@@ -17,9 +17,14 @@ let currentMode = 'chat'; // 'chat' | 'translate'
 let conversations = loadConversations();
 let activeConversationId = null;
 let isGenerating = false;
-let mediaRecorder = null;
-let audioChunks = [];
 let isRecording = false;
+// Web Audio recording state (records raw PCM so we can encode a WAV the STT engine reads)
+let audioContext = null;
+let mediaStream = null;
+let sourceNode = null;
+let processorNode = null;
+let recordedSamples = [];   // Float32 PCM chunks at audioContext.sampleRate
+let recordSampleRate = 48000;
 
 // ── Initialization ────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -566,22 +571,28 @@ async function toggleMic() {
 
 async function startRecording() {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const mimeType = getBestMimeType();
-    mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-    audioChunks = [];
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) audioChunks.push(e.data);
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    audioContext = new AudioCtx();
+    // Some browsers start the context suspended until a user gesture.
+    if (audioContext.state === 'suspended') await audioContext.resume();
+
+    recordSampleRate = audioContext.sampleRate;
+    recordedSamples = [];
+
+    sourceNode = audioContext.createMediaStreamSource(mediaStream);
+    processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+
+    processorNode.onaudioprocess = (e) => {
+      if (!isRecording) return;
+      // Copy — the underlying buffer is reused by the audio thread.
+      recordedSamples.push(new Float32Array(e.inputBuffer.getChannelData(0)));
     };
 
-    mediaRecorder.onstop = async () => {
-      stream.getTracks().forEach(t => t.stop());
-      const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
-      await transcribeAudio(blob);
-    };
+    sourceNode.connect(processorNode);
+    processorNode.connect(audioContext.destination);
 
-    mediaRecorder.start(250);
     isRecording = true;
     updateMicButton();
   } catch (err) {
@@ -589,12 +600,84 @@ async function startRecording() {
   }
 }
 
-function stopRecording() {
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    mediaRecorder.stop();
-  }
+async function stopRecording() {
   isRecording = false;
   updateMicButton();
+
+  // Tear down the audio graph.
+  if (processorNode) { processorNode.disconnect(); processorNode.onaudioprocess = null; }
+  if (sourceNode) sourceNode.disconnect();
+  if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+  if (audioContext) { try { await audioContext.close(); } catch {} }
+
+  const samples = flattenSamples(recordedSamples);
+  recordedSamples = [];
+  processorNode = sourceNode = mediaStream = audioContext = null;
+
+  if (samples.length === 0) {
+    alert('No audio captured — please hold the mic and speak, then stop.');
+    return;
+  }
+
+  // Downsample to 16 kHz mono and encode a 16-bit PCM WAV (what the STT engine expects).
+  const wavBlob = encodeWav(downsample(samples, recordSampleRate, 16000), 16000);
+  await transcribeAudio(wavBlob);
+}
+
+// ── PCM → WAV helpers ─────────────────────────────────────────────────────────
+function flattenSamples(chunks) {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const out = new Float32Array(total);
+  let offset = 0;
+  for (const c of chunks) { out.set(c, offset); offset += c.length; }
+  return out;
+}
+
+function downsample(samples, inRate, outRate) {
+  if (outRate >= inRate) return samples;
+  const ratio = inRate / outRate;
+  const outLength = Math.floor(samples.length / ratio);
+  const out = new Float32Array(outLength);
+  for (let i = 0; i < outLength; i++) {
+    // Average the source window to avoid aliasing.
+    const start = Math.floor(i * ratio);
+    const end = Math.min(samples.length, Math.floor((i + 1) * ratio));
+    let sum = 0, count = 0;
+    for (let j = start; j < end; j++) { sum += samples[j]; count++; }
+    out[i] = count ? sum / count : 0;
+  }
+  return out;
+}
+
+function encodeWav(samples, sampleRate) {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const writeStr = (offset, str) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  const dataSize = samples.length * 2;
+
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);          // PCM chunk size
+  view.setUint16(20, 1, true);           // audio format = PCM
+  view.setUint16(22, 1, true);           // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // byte rate (sampleRate * blockAlign)
+  view.setUint16(32, 2, true);           // block align (channels * bytesPerSample)
+  view.setUint16(34, 16, true);          // bits per sample
+  writeStr(36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++, offset += 2) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return new Blob([view], { type: 'audio/wav' });
 }
 
 function updateMicButton() {
@@ -612,8 +695,7 @@ function updateMicButton() {
 
 async function transcribeAudio(blob) {
   const formData = new FormData();
-  const cleanType = (blob.type || 'audio/webm').split(';')[0];
-  formData.append('file', new File([blob], 'recording.webm', { type: cleanType }));
+  formData.append('file', new File([blob], 'recording.wav', { type: 'audio/wav' }));
 
   try {
     const resp = await fetch(apiUrl('/voice/stt'), {
@@ -639,14 +721,6 @@ async function transcribeAudio(blob) {
     console.error('STT error:', err);
     alert('Speech-to-text failed: ' + err.message);
   }
-}
-
-function getBestMimeType() {
-  const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
-  for (const t of types) {
-    if (MediaRecorder.isTypeSupported(t)) return t;
-  }
-  return '';
 }
 
 // ── Voice Output (TTS) ────────────────────────────────────────────────────────
