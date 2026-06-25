@@ -225,8 +225,10 @@ async function sendMessage() {
     renderConversationList();
   }
 
-  // Add user message
-  conv.messages.push({ role: 'user', content: text });
+  // Add user message — tag translate-mode turns so they don't pollute chat context
+  const userMsg = { role: 'user', content: text };
+  if (currentMode === 'translate') userMsg.meta = { type: 'translation' };
+  conv.messages.push(userMsg);
   saveConversations();
 
   // Clear input
@@ -260,7 +262,13 @@ async function generateChatResponse() {
   updateSendButton();
   showTypingIndicator();
 
-  const messages = conv.messages.map(m => ({ role: m.role, content: m.content }));
+  // Only send real chat turns to the LLM. Excluding translation turns (which are
+  // often Arabic) and error notices prevents the model from continuing in the
+  // wrong language or echoing error text.
+  const messages = conv.messages
+    .filter(m => m.meta?.type !== 'translation')
+    .filter(m => !(m.role === 'assistant' && m.content.startsWith('⚠️')))
+    .map(m => ({ role: m.role, content: m.content }));
 
   try {
     const response = await fetch(apiUrl('/chat'), {
