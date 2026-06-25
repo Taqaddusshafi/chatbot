@@ -172,7 +172,7 @@ async def translate(request: TranslateRequest):
 async def voice_tts(
     text: str = Form(...),
     language: str = Form(default="en"),
-    voice: str = Form(default="divya"),
+    voice: str = Form(default="v2/en_speaker_6"),
 ):
     """Proxy TTS request to the existing Voice Gateway TTS engine."""
     url = f"{settings.tts_engine_url.rstrip('/')}{settings.tts_engine_path}"

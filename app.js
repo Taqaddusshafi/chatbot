@@ -8,7 +8,10 @@ const DEFAULT_CONFIG = {
   apiUrl: '',  // empty = same origin (works on Vercel and local)
   temperature: 0.7,
   maxTokens: 2048,
-  ttsVoice: 'divya',
+  // English/Arabic synthesis runs on the Bark engine, so the voice must be a
+  // Bark speaker preset (v2/en_speaker_*). Indic-Parler names like "divya"
+  // are not valid Bark voices and cause noise / hallucinated extra voices.
+  ttsVoice: 'v2/en_speaker_6',
   autoSpeak: 'off',
 };
 
@@ -51,7 +54,14 @@ function apiUrl(path) {
 function loadConfig() {
   try {
     const saved = localStorage.getItem('chatbot_config');
-    return saved ? { ...DEFAULT_CONFIG, ...JSON.parse(saved) } : { ...DEFAULT_CONFIG };
+    const cfg = saved ? { ...DEFAULT_CONFIG, ...JSON.parse(saved) } : { ...DEFAULT_CONFIG };
+    // Migrate stale voices: older builds stored Indic-Parler speaker names
+    // (e.g. "divya"), which are invalid for the Bark engine used by en/ar and
+    // cause garbled / noisy output. Reset anything that isn't a Bark preset.
+    if (!/^v2\/[a-z]{2}_speaker_\d+$/.test(cfg.ttsVoice || '')) {
+      cfg.ttsVoice = DEFAULT_CONFIG.ttsVoice;
+    }
+    return cfg;
   } catch {
     return { ...DEFAULT_CONFIG };
   }
@@ -330,9 +340,12 @@ async function generateChatResponse() {
     renderMessages();
     scrollToBottom();
 
-    // Auto-speak if enabled
+    // Auto-speak if enabled. Detect the reply language so Arabic replies are
+    // tagged 'ar' (not the 'en' default) — sending the wrong language code
+    // mis-routes the engine and degrades pronunciation.
     if (config.autoSpeak === 'on' && conv.messages[msgIndex].content) {
-      speakText(conv.messages[msgIndex].content);
+      const replyLang = detectArabic(conv.messages[msgIndex].content) ? 'ar' : 'en';
+      speakText(conv.messages[msgIndex].content, replyLang);
     }
 
   } catch (err) {
@@ -733,10 +746,20 @@ async function transcribeAudio(blob) {
 
 // ── Voice Output (TTS) ────────────────────────────────────────────────────────
 async function speakText(text, language = 'en') {
-  // Strip markdown for TTS
+  // Clean the text for TTS. Anything left here gets "pronounced" by the
+  // engine, so URLs, code, emojis and stray markdown are the usual sources of
+  // garbled / noisy speech — strip them rather than feed them to the model.
   const cleanText = text
-    .replace(/[#*`_~\[\]()]/g, '')
-    .replace(/\n+/g, '. ')
+    .replace(/```[\s\S]*?```/g, ' ')               // fenced code blocks
+    .replace(/`[^`]*`/g, ' ')                        // inline code
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')       // [label](url) → label
+    .replace(/https?:\/\/\S+|www\.\S+/gi, ' ')       // bare URLs
+    .replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}️]/gu, ' ') // emojis/symbols
+    .replace(/[#*_~>`|\[\]()]/g, ' ')                // remaining markdown punctuation
+    .replace(/^\s*[-•]\s+/gm, '')                    // list bullets
+    .replace(/\n+/g, '. ')                           // newlines → sentence breaks
+    .replace(/\s+/g, ' ')                            // collapse whitespace
+    .replace(/(\.\s*){2,}/g, '. ')                   // collapse repeated periods
     .trim()
     .substring(0, 1000);
 

@@ -136,15 +136,15 @@
       <input type="number" id="settingMaxTokens" min="64" max="8192" step="64" />
 
       <label for="settingTtsVoice">TTS Voice</label>
+      <!-- English/Arabic route to the Bark engine, so these MUST be Bark
+           speaker presets (v2/en_speaker_*). Indic-Parler speaker names
+           (e.g. "divya") are NOT valid Bark voices and make Bark fall back
+           to a random speaker, which produces noise / extra voices. -->
       <select id="settingTtsVoice">
-        <option value="divya">Divya (Female, Monotone)</option>
-        <option value="sita">Sita (Female, Calm)</option>
-        <option value="meera">Meera (Female, Warm)</option>
-        <option value="priya">Priya (Female, Professional)</option>
-        <option value="rohit">Rohit (Male, Calm)</option>
-        <option value="arjun">Arjun (Male, Deep)</option>
-        <option value="vikram">Vikram (Male, Confident)</option>
-        <option value="amir">Amir (Male, Clear)</option>
+        <option value="v2/en_speaker_6">Female — Clear (default)</option>
+        <option value="v2/en_speaker_9">Female — Warm</option>
+        <option value="v2/en_speaker_3">Male — Calm</option>
+        <option value="v2/en_speaker_1">Male — Deep</option>
       </select>
 
       <label for="settingAutoSpeak">Auto-speak AI responses</label>
