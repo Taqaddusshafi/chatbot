@@ -1,228 +1,130 @@
-# AI Chatbot with Voice Gateway Integration
+# ConversaAI Chatbot with Voice Gateway Integration
 
-Build a professional chatbot powered by **LLaMA 3.1 8B-Instruct** that integrates with your existing **Voice Gateway** system for voice I/O (TTS/STT).
+A professional, high-performance web interface and FastAPI backend proxy for **LLaMA 3.1 8B-Instruct** (hosted via **vLLM** on your GPU server). It seamlessly integrates with your existing **Voice Gateway** endpoints (`185.14.252.20`) to handle Speech-to-Text (STT) and Text-to-Speech (TTS).
 
-## Architecture Overview
+---
+
+## 🏗️ Architecture & Port Mappings
 
 ```mermaid
-flowchart LR
-    UI["🖥️ Chatbot Frontend\n(HTML/CSS/JS)"] -->|"Chat/Translate"| LLM["🤖 LLM Service\n(FastAPI :8002)"]
-    UI -->|"Voice Out (TTS)"| VGW["🔊 Voice Gateway\n(185.14.252.20:8000)"]
-    UI -->|"Voice In (STT)"| STT["🎙️ STT Engine\n(185.14.252.20:8002)"]
-    LLM -->|"OpenAI API"| VLLM["🦙 vLLM\nLLaMA 3.1\n(GPU Server)"]
-
-    style UI fill:#6366f1,color:#fff
-    style LLM fill:#f59e0b,color:#000
-    style VGW fill:#10b981,color:#fff
-    style STT fill:#00cec9,color:#000
-    style VLLM fill:#e74c3c,color:#fff
+flowchart TD
+    UI["🖥️ Premium Web UI\n(HTML/CSS/JS)"] <-->|"Proxy requests via /api/*"| BE["⚡ Chatbot Backend\n(FastAPI / Vercel Serverless)"]
+    
+    subgraph "GPU Infrastructure (185.14.252.20)"
+        BE <-->|"Port 8007: Chat & Translation"| VLLM["🦙 vLLM Engine\n(LLaMA 3.1 8B-Instruct)"]
+        BE <-->|"Port 8000: /v1/tts"| TTS["🔊 TTS Engine"]
+        BE <-->|"Port 8002: /v1/stt"| STT["🎙️ STT Engine"]
+    end
 ```
 
-### How It Works
-1. User types or speaks → STT converts speech to text
-2. Text goes to LLM Service → forwards to vLLM on GPU → returns AI response
-3. AI response shown in chat → optionally spoken aloud via TTS
-4. Translation mode uses specialized system prompts for Arabic ↔ English
+| Service | Host | Port | Endpoint / Path | Purpose |
+| :--- | :--- | :--- | :--- | :--- |
+| **vLLM Engine** | `185.14.252.20` | **8007** | `/v1/chat/completions` | Large Language Model (Inference) |
+| **TTS Engine** | `185.14.252.20` | **8000** | `/v1/tts` | Text-to-Speech (Audio output) |
+| **STT Engine** | `185.14.252.20` | **8002** | `/v1/stt` | Speech-to-Text (Voice input) |
+| **Local Proxy Backend** | `localhost` | **8008** | `/api/*` | Local development API gateway |
 
 ---
 
-## User Review Required
+## 🚀 Getting Started
 
-> [!IMPORTANT]
-> **Your existing Voice Gateway** at `http://185.14.252.20` already handles TTS (port 8000) and STT (port 8002). The chatbot will reuse these endpoints directly — no need to duplicate voice infrastructure.
+### 1. Local Development (Backend & Frontend)
 
-> [!WARNING]
-> **GPU Server for LLM**: Where will vLLM run? Options:
-> 1. **Same server** as your TTS/STT (`185.14.252.20`) — simplest, if GPU has spare capacity
-> 2. **Separate GPU server** — if the L40 is a different machine
->
-> I'll set it up so the LLM endpoint URL is configurable in `.env`.
+#### Prerequisites
+* Python 3.10+
+* Local dependencies: `pip install -r server/requirements.txt`
 
-## Open Questions
-
-> [!IMPORTANT]
-> 1. **Where does vLLM run?** Same machine as TTS/STT (`185.14.252.20`) or a different GPU server?
-> 2. **What port for vLLM?** I'll default to `8003` to avoid conflicts with TTS (8000) and STT (8002).
-> 3. **Do you want the chatbot to auto-speak responses** via TTS, or only on-demand (click a speaker icon)?
-
----
-
-## Proposed Changes
-
-### Component 1: LLM Chat Service (FastAPI Backend)
-
-A lightweight FastAPI service that acts as a bridge between the frontend and vLLM on the GPU.
-
-#### [NEW] [server/main.py](file:///Users/taqaddusshafi/Desktop/chatbot/server/main.py)
-FastAPI application with CORS, serving:
-- `POST /chat` — Send message, get streaming response from LLM
-- `POST /translate` — Arabic ↔ English translation via LLM
-- `GET /health` — Health check
-- `GET /models` — List available models from vLLM
-
-#### [NEW] [server/config.py](file:///Users/taqaddusshafi/Desktop/chatbot/server/config.py)
-Environment-driven settings:
-```python
-VLLM_BASE_URL = "http://localhost:8003/v1"  # vLLM OpenAI-compatible API
-TTS_ENGINE_URL = "http://185.14.252.20:8000"  # Existing Voice Gateway TTS
-STT_ENGINE_URL = "http://185.14.252.20:8002"  # Existing Voice Gateway STT
-```
-
-#### [NEW] [server/llm_service.py](file:///Users/taqaddusshafi/Desktop/chatbot/server/llm_service.py)
-- OpenAI-compatible client connecting to vLLM
-- Streaming chat completions via SSE
-- System prompt management for translation vs. chat modes
-- Arabic ↔ English translation with language auto-detection
-
-#### [NEW] [server/requirements.txt](file:///Users/taqaddusshafi/Desktop/chatbot/server/requirements.txt)
-```
-fastapi
-uvicorn[standard]
-httpx
-openai
-python-dotenv
-pydantic-settings
-sse-starlette
-```
-
-#### [NEW] [server/.env.example](file:///Users/taqaddusshafi/Desktop/chatbot/server/.env.example)
+#### Steps
+1. Navigate to the `server` directory and copy `.env.example` to `.env`:
+   ```bash
+   cp server/.env.example server/.env
+   ```
+2. Open `server/.env` and verify the settings:
+   ```env
+   PORT=8008
+   VLLM_BASE_URL=http://185.14.252.20:8007/v1
+   VLLM_API_KEY=EMPTY   # Change this to your API Key if secured
+   VLLM_MODEL=meta-llama/Llama-3.1-8B-Instruct
+   
+   TTS_ENGINE_URL=http://185.14.252.20:8000
+   STT_ENGINE_URL=http://185.14.252.20:8002
+   ```
+3. Run the local backend:
+   ```bash
+   python server/main.py
+   ```
+4. Access the web interface at **`http://localhost:8008`**.
+5. Check health check stats directly at **`http://localhost:8008/api/engine-health`**.
 
 ---
 
-### Component 2: Chatbot Frontend (Premium Web UI)
+### 2. GPU Server Setup (vLLM Engine)
 
-A stunning single-page chatbot that connects to all three backends.
+If you need to install or start the vLLM engine on the GPU server at `185.14.252.20`:
 
-#### [NEW] [index.html](file:///Users/taqaddusshafi/Desktop/chatbot/index.html)
-Main structure:
-- Chat message area with bubbles (user/assistant)
-- Input bar with text input + mic button + send button
-- Sidebar: conversation history, mode switcher, settings
-- Mode toggle: 💬 Chat | 🌐 Translate (Arabic ↔ English)
-- Speaker icon on each AI response to hear it via TTS
-- RTL text support for Arabic messages
+1. Copy [gpu_setup.sh](file:///Users/taqaddusshafi/Desktop/chatbot/server/gpu_setup.sh) to your GPU host.
+2. Initialize the environment:
+   ```bash
+   export HF_TOKEN=your_hugging_face_token_here
+   chmod +x gpu_setup.sh
+   ./gpu_setup.sh
+   ```
+3. Start the service (runs on port **`8007`**):
+   ```bash
+   ./start_server.sh
+   ```
 
-#### [NEW] [style.css](file:///Users/taqaddusshafi/Desktop/chatbot/style.css)
-Premium design system matching the Voice Gateway's aesthetic:
-- Same dark mode palette (`#0a0a0f`, `#111118`)
-- Glassmorphism cards with `backdrop-filter: blur()`
-- Purple → Cyan gradient accents (matching Voice Gateway)
-- Google Fonts: Inter + Noto Sans Arabic
-- Smooth micro-animations (message appear, typing indicator)
-- RTL layout support
-- Mobile responsive
-
-#### [NEW] [app.js](file:///Users/taqaddusshafi/Desktop/chatbot/app.js)
-Core application logic:
-- **Chat Engine**: POST to `/chat` with streaming SSE response
-- **Translation Mode**: POST to `/translate` with auto-detection
-- **Voice Input**: Record audio → send to STT (`185.14.252.20:8002`) → get text → send to chat
-- **Voice Output**: Click speaker on AI message → send text to TTS (`185.14.252.20:8000`) → play audio
-- **Conversations**: Create/switch/delete (localStorage)
-- **Arabic Detection**: Auto RTL for Arabic text
-- **Markdown Rendering**: Basic formatting in responses
-- **Typing Indicator**: Animated dots while LLM generates
+> [!TIP]
+> **Securing the vLLM Server:**
+> Since your GPU is exposed on a public IP, secure it by adding `--api-key your_secret_key` when launching `vllm serve`. Then update `VLLM_API_KEY` to match it in your chatbot `.env`.
 
 ---
 
-### Component 3: GPU Server Setup (Instructions)
+### 3. Deploying to Vercel (Production)
 
-#### [NEW] [server/gpu_setup.sh](file:///Users/taqaddusshafi/Desktop/chatbot/server/gpu_setup.sh)
-Setup script for your GPU server:
+This repository is pre-configured for instant deployment on Vercel:
+
+1. Deploy the directory using the Vercel CLI or connect it to GitHub:
+   ```bash
+   vercel
+   ```
+2. Configure these Environment Variables on your Vercel Project Dashboard:
+   - `VLLM_BASE_URL` = `http://185.14.252.20:8007/v1`
+   - `VLLM_API_KEY` = `EMPTY` (or your custom API key)
+   - `VLLM_MODEL` = `meta-llama/Llama-3.1-8B-Instruct`
+   - `TTS_ENGINE_URL` = `http://185.14.252.20:8000`
+   - `STT_ENGINE_URL` = `http://185.14.252.20:8002`
+
+---
+
+## 🧪 Verification & Testing Commands
+
+Verify connection health using these simple curl requests:
+
 ```bash
-# Install vLLM
-pip install vllm
+# 1. Test local proxy health
+curl http://localhost:8008/api/health
 
-# Serve LLaMA 3.1 8B-Instruct on port 8003
-vllm serve meta-llama/Llama-3.1-8B-Instruct \
-  --host 0.0.0.0 --port 8003 \
-  --gpu-memory-utilization 0.9 \
-  --max-model-len 8192
+# 2. Check engine connectivity (vLLM, TTS, STT)
+curl http://localhost:8008/api/engine-health
+
+# 3. Test LLM Chat streaming
+curl -X POST http://localhost:8008/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Hello"}], "stream": false}'
+
+# 4. Test Translation (Auto-detects language and translates)
+curl -X POST http://localhost:8008/api/translate \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Good morning, how are you?"}'
 ```
 
 ---
 
-## Feature Map
+## ✨ Key Features Included
 
-| Feature | Backend | Endpoint |
-|---|---|---|
-| General Chat | LLM Service → vLLM | `POST /chat` |
-| Arabic → English | LLM Service → vLLM | `POST /translate` |
-| English → Arabic | LLM Service → vLLM | `POST /translate` |
-| Speak AI Response | Existing TTS Engine | `POST 185.14.252.20:8000/v1/tts` |
-| Voice Input | Existing STT Engine | `POST 185.14.252.20:8002/v1/stt` |
-| Conversation History | Frontend (localStorage) | — |
-
-## Integration with Voice Gateway
-
-The chatbot **reuses** your existing Voice Gateway infrastructure:
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant F as Frontend
-    participant L as LLM Service
-    participant V as vLLM (GPU)
-    participant T as TTS (185.14.252.20)
-    participant S as STT (185.14.252.20)
-
-    Note over U,S: Text Chat Flow
-    U->>F: Type message
-    F->>L: POST /chat {messages}
-    L->>V: OpenAI API stream
-    V-->>L: Token stream
-    L-->>F: SSE tokens
-    F->>U: Display response
-
-    Note over U,S: Voice Input Flow
-    U->>F: Click mic, speak
-    F->>S: POST /v1/stt {audio}
-    S-->>F: {text: "transcription"}
-    F->>L: POST /chat {messages}
-    L-->>F: AI response
-    F->>U: Display response
-
-    Note over U,S: Voice Output Flow
-    U->>F: Click speaker on response
-    F->>T: POST /v1/tts {text, voice}
-    T-->>F: audio/wav
-    F->>U: Play audio
-```
-
----
-
-## Verification Plan
-
-### Automated Tests
-```bash
-# 1. Test vLLM is running
-curl http://<gpu-server>:8003/v1/models
-
-# 2. Test LLM service
-curl -X POST http://localhost:8002/chat \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Hello"}]}'
-
-# 3. Test translation
-curl -X POST http://localhost:8002/translate \
-  -H "Content-Type: application/json" \
-  -d '{"text":"Good morning","target_lang":"ar"}'
-
-# 4. Test existing TTS still works
-curl -X POST http://185.14.252.20:8000/v1/tts \
-  -H "Content-Type: application/json" \
-  -d '{"text":"Hello","language":"en","voice":"aria"}' -o test.wav
-
-# 5. Test existing STT still works
-curl -X POST http://185.14.252.20:8002/v1/stt -F "file=@test.wav"
-```
-
-### Manual Verification
-- Open chatbot in browser
-- Test general chat conversation
-- Test Arabic → English translation
-- Test English → Arabic translation
-- Click mic → speak → verify STT transcription → AI response
-- Click speaker icon on AI response → verify TTS audio plays
-- Test conversation history (create, switch, delete)
-- Test on mobile viewport
+* **Streaming SSE Chat:** True word-by-word real-time generation.
+* **Premium Glassmorphic UI:** Smooth dark mode layouts, typography (Inter & Noto Sans Arabic), micro-animations, and dynamic status dots.
+* **RTL Language Detection:** Automatic right-to-left layout formatting for Arabic messages.
+* **Integrated translation mode:** Simple toggle to swap between conversational chatbot and high-fidelity translator.
+* **Auto-Voice capability:** Toggle auto-speech on/off in Settings, or use on-demand buttons per bubble.
