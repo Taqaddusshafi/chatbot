@@ -8,11 +8,6 @@ const DEFAULT_CONFIG = {
   apiUrl: '',  // empty = same origin (works on Vercel and local)
   temperature: 0.7,
   maxTokens: 2048,
-  // English/Arabic synthesis runs on the Bark engine, so the voice must be a
-  // Bark speaker preset (v2/en_speaker_*). Indic-Parler names like "divya"
-  // are not valid Bark voices and cause noise / hallucinated extra voices.
-  ttsVoice: 'v2/en_speaker_6',
-  autoSpeak: 'off',
 };
 
 let config = loadConfig();
@@ -54,14 +49,7 @@ function apiUrl(path) {
 function loadConfig() {
   try {
     const saved = localStorage.getItem('chatbot_config');
-    const cfg = saved ? { ...DEFAULT_CONFIG, ...JSON.parse(saved) } : { ...DEFAULT_CONFIG };
-    // Migrate stale voices: older builds stored Indic-Parler speaker names
-    // (e.g. "divya"), which are invalid for the Bark engine used by en/ar and
-    // cause garbled / noisy output. Reset anything that isn't a Bark preset.
-    if (!/^v2\/[a-z]{2}_speaker_\d+$/.test(cfg.ttsVoice || '')) {
-      cfg.ttsVoice = DEFAULT_CONFIG.ttsVoice;
-    }
-    return cfg;
+    return saved ? { ...DEFAULT_CONFIG, ...JSON.parse(saved) } : { ...DEFAULT_CONFIG };
   } catch {
     return { ...DEFAULT_CONFIG };
   }
@@ -71,8 +59,6 @@ function saveSettings() {
   config.apiUrl = document.getElementById('settingApiUrl').value.replace(/\/$/, '') || '';
   config.temperature = parseFloat(document.getElementById('settingTemperature').value) || DEFAULT_CONFIG.temperature;
   config.maxTokens = parseInt(document.getElementById('settingMaxTokens').value) || DEFAULT_CONFIG.maxTokens;
-  config.ttsVoice = document.getElementById('settingTtsVoice').value;
-  config.autoSpeak = document.getElementById('settingAutoSpeak').value;
 
   localStorage.setItem('chatbot_config', JSON.stringify(config));
   toggleSettings();
@@ -83,8 +69,6 @@ function applyConfig() {
   document.getElementById('settingApiUrl').value = config.apiUrl;
   document.getElementById('settingTemperature').value = config.temperature;
   document.getElementById('settingMaxTokens').value = config.maxTokens;
-  document.getElementById('settingTtsVoice').value = config.ttsVoice;
-  document.getElementById('settingAutoSpeak').value = config.autoSpeak;
 }
 
 // ── Conversation Management ───────────────────────────────────────────────────
@@ -340,14 +324,6 @@ async function generateChatResponse() {
     renderMessages();
     scrollToBottom();
 
-    // Auto-speak if enabled. Detect the reply language so Arabic replies are
-    // tagged 'ar' (not the 'en' default) — sending the wrong language code
-    // mis-routes the engine and degrades pronunciation.
-    if (config.autoSpeak === 'on' && conv.messages[msgIndex].content) {
-      const replyLang = detectArabic(conv.messages[msgIndex].content) ? 'ar' : 'en';
-      speakText(conv.messages[msgIndex].content, replyLang);
-    }
-
   } catch (err) {
     removeTypingIndicator();
     conv.messages.push({
@@ -399,11 +375,6 @@ async function generateTranslation(text) {
     saveConversations();
     renderMessages();
     scrollToBottom();
-
-    if (config.autoSpeak === 'on' && data.translation) {
-      const lang = data.target_lang === 'ar' ? 'ar' : 'en';
-      speakText(data.translation, lang);
-    }
 
   } catch (err) {
     removeTypingIndicator();
@@ -493,19 +464,6 @@ function createMessageElement(msg, index) {
   copyBtn.textContent = '📋';
   copyBtn.onclick = () => copyMessage(msg.content, copyBtn);
   actions.appendChild(copyBtn);
-
-  // Speak button (for AI messages)
-  if (!isUser) {
-    const speakBtn = document.createElement('button');
-    speakBtn.className = 'msg-action-btn';
-    speakBtn.title = 'Speak';
-    speakBtn.textContent = '🔊';
-    speakBtn.onclick = () => {
-      const lang = isArabic ? 'ar' : 'en';
-      speakText(msg.content, lang);
-    };
-    actions.appendChild(speakBtn);
-  }
 
   content.appendChild(actions);
 
@@ -744,65 +702,6 @@ async function transcribeAudio(blob) {
   }
 }
 
-// ── Voice Output (TTS) ────────────────────────────────────────────────────────
-async function speakText(text, language = 'en') {
-  // Clean the text for TTS. Anything left here gets "pronounced" by the
-  // engine, so URLs, code, emojis and stray markdown are the usual sources of
-  // garbled / noisy speech — strip them rather than feed them to the model.
-  const cleanText = text
-    .replace(/```[\s\S]*?```/g, ' ')               // fenced code blocks
-    .replace(/`[^`]*`/g, ' ')                        // inline code
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')       // [label](url) → label
-    .replace(/https?:\/\/\S+|www\.\S+/gi, ' ')       // bare URLs
-    .replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}️]/gu, ' ') // emojis/symbols
-    .replace(/[#*_~>`|\[\]()]/g, ' ')                // remaining markdown punctuation
-    .replace(/^\s*[-•]\s+/gm, '')                    // list bullets
-    .replace(/\n+/g, '. ')                           // newlines → sentence breaks
-    .replace(/\s+/g, ' ')                            // collapse whitespace
-    .replace(/(\.\s*){2,}/g, '. ')                   // collapse repeated periods
-    .trim()
-    .substring(0, 1000);
-
-  if (!cleanText) return;
-
-  const formData = new FormData();
-  formData.append('text', cleanText);
-  formData.append('language', language);
-  formData.append('voice', config.ttsVoice);
-
-  try {
-    const resp = await fetch(apiUrl('/voice/tts'), {
-      method: 'POST',
-      body: formData,
-    });
-
-    if (!resp.ok) {
-      // Surface the engine's actual error instead of failing silently.
-      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-      throw new Error(err.detail || `HTTP ${resp.status}`);
-    }
-
-    const blob = await resp.blob();
-
-    // The engine sometimes returns a JSON error body with a 200 status, or an
-    // empty body — either way it isn't playable audio.
-    if (blob.size === 0 || !/^audio\//.test(blob.type)) {
-      const text = await blob.text().catch(() => '');
-      throw new Error(text ? text.slice(0, 300) : 'Engine returned no audio.');
-    }
-
-    const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    audio.onended = () => URL.revokeObjectURL(url);
-    audio.onerror = () => URL.revokeObjectURL(url);
-    // play() returns a promise that rejects under autoplay policy or bad audio.
-    await audio.play();
-  } catch (err) {
-    console.error('TTS error:', err);
-    alert('Text-to-speech failed: ' + err.message);
-  }
-}
-
 // ── Health Check ──────────────────────────────────────────────────────────────
 async function checkEngineHealth() {
   try {
@@ -810,11 +709,9 @@ async function checkEngineHealth() {
     const data = await resp.json();
 
     updateStatusDot('statusLlm', data.llm?.status);
-    updateStatusDot('statusTts', data.tts?.status);
     updateStatusDot('statusStt', data.stt?.status);
   } catch {
     updateStatusDot('statusLlm', 'error');
-    updateStatusDot('statusTts', 'error');
     updateStatusDot('statusStt', 'error');
   }
 }

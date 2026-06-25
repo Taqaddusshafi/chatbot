@@ -50,10 +50,6 @@
             LLM
           </div>
           <div class="status-dot">
-            <span class="status-dot__indicator checking" id="statusTts"></span>
-            TTS
-          </div>
-          <div class="status-dot">
             <span class="status-dot__indicator checking" id="statusStt"></span>
             STT
           </div>
@@ -134,24 +130,6 @@
 
       <label for="settingMaxTokens">Max Tokens</label>
       <input type="number" id="settingMaxTokens" min="64" max="8192" step="64" />
-
-      <label for="settingTtsVoice">TTS Voice</label>
-      <!-- English/Arabic route to the Bark engine, so these MUST be Bark
-           speaker presets (v2/en_speaker_*). Indic-Parler speaker names
-           (e.g. "divya") are NOT valid Bark voices and make Bark fall back
-           to a random speaker, which produces noise / extra voices. -->
-      <select id="settingTtsVoice">
-        <option value="v2/en_speaker_6">Female — Clear (default)</option>
-        <option value="v2/en_speaker_9">Female — Warm</option>
-        <option value="v2/en_speaker_3">Male — Calm</option>
-        <option value="v2/en_speaker_1">Male — Deep</option>
-      </select>
-
-      <label for="settingAutoSpeak">Auto-speak AI responses</label>
-      <select id="settingAutoSpeak">
-        <option value="off">Off — Click speaker icon</option>
-        <option value="on">On — Auto-play voice</option>
-      </select>
 
       <button class="btn-save" onclick="saveSettings()">Save Settings</button>
     </div>
