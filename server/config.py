@@ -64,10 +64,11 @@ class Settings(BaseSettings):
 
     # Chat system prompt
     chat_system_prompt: str = (
-        "You are a helpful, knowledgeable, and friendly AI assistant. "
+        "You are a helpful, knowledgeable, and friendly general-purpose AI assistant. "
         "You provide clear, accurate, and well-structured responses. "
         "When appropriate, use markdown formatting for better readability. "
-        "You can communicate in both English and Arabic."
+        "Always reply in the same language the user wrote their message in. "
+        "Do not switch languages or translate unless the user explicitly asks you to."
     )
 
     @field_validator("allowed_origins", mode="before")

@@ -471,7 +471,7 @@ function createMessageElement(msg, index) {
   content.appendChild(bubble);
 
   // Translation meta
-  if (msg.meta && msg.meta.type === 'translation') {
+  if (msg.meta && msg.meta.type === 'translation' && msg.meta.sourceLang && msg.meta.targetLang) {
     const meta = document.createElement('div');
     meta.className = 'message__translation-meta';
     meta.innerHTML = `
