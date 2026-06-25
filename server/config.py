@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     ]
 
     # vLLM / OpenAI-compatible LLM backend
-    vllm_base_url: str = "http://localhost:8007/v1"
+    vllm_base_url: str = "http://185.14.252.20:8007/v1"
     vllm_api_key: str = "EMPTY"
     vllm_model: str = "meta-llama/Llama-3.1-8B-Instruct"
     vllm_timeout: float = 120.0

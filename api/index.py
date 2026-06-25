@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 # ── Engine URLs from environment ─────────────────────────────────────────────
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8007/v1")
+VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://185.14.252.20:8007/v1")
 VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "EMPTY")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
 VLLM_TIMEOUT = float(os.environ.get("VLLM_TIMEOUT", "120"))
