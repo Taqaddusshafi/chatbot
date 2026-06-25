@@ -746,16 +746,29 @@ async function speakText(text, language = 'en') {
     });
 
     if (!resp.ok) {
-      throw new Error(`TTS failed: HTTP ${resp.status}`);
+      // Surface the engine's actual error instead of failing silently.
+      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+      throw new Error(err.detail || `HTTP ${resp.status}`);
     }
 
     const blob = await resp.blob();
+
+    // The engine sometimes returns a JSON error body with a 200 status, or an
+    // empty body — either way it isn't playable audio.
+    if (blob.size === 0 || !/^audio\//.test(blob.type)) {
+      const text = await blob.text().catch(() => '');
+      throw new Error(text ? text.slice(0, 300) : 'Engine returned no audio.');
+    }
+
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
-    audio.play();
     audio.onended = () => URL.revokeObjectURL(url);
+    audio.onerror = () => URL.revokeObjectURL(url);
+    // play() returns a promise that rejects under autoplay policy or bad audio.
+    await audio.play();
   } catch (err) {
     console.error('TTS error:', err);
+    alert('Text-to-speech failed: ' + err.message);
   }
 }
 
