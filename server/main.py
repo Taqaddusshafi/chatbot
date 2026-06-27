@@ -169,51 +169,130 @@ async def translate(request: TranslateRequest):
 
 import re as _re
 
-# Language → best neural voice mapping
+# Language → best neural voice mapping (all major Indian + international languages)
 EDGE_TTS_VOICES = {
-    "ur": "ur-PK-UzmaNeural",      # Urdu (female, natural)
-    "ur-male": "ur-PK-AsadNeural",  # Urdu (male)
-    "ar": "ar-SA-ZariyahNeural",    # Arabic (female)
-    "ar-male": "ar-SA-HamedNeural", # Arabic (male)
-    "hi": "hi-IN-SwaraNeural",      # Hindi (female)
-    "hi-male": "hi-IN-MadhurNeural",# Hindi (male)
-    "en": "en-US-JennyNeural",      # English US (female)
-    "en-male": "en-US-GuyNeural",   # English US (male)
-    "en-GB": "en-GB-SoniaNeural",   # English UK
-    "fr": "fr-FR-DeniseNeural",     # French
-    "es": "es-ES-ElviraNeural",     # Spanish
-    "de": "de-DE-KatjaNeural",      # German
-    "tr": "tr-TR-EmelNeural",       # Turkish
-    "bn": "bn-IN-TanishaaNeural",   # Bengali
-    "ta": "ta-IN-PallaviNeural",    # Tamil
-    "te": "te-IN-ShrutiNeural",     # Telugu
-    "pa": "pa-IN-GurpreetNeural",   # Punjabi
-    "ru": "ru-RU-SvetlanaNeural",   # Russian
-    "zh": "zh-CN-XiaoxiaoNeural",   # Chinese
-    "fa": "fa-IR-DilaraNeural",     # Persian
+    # ── Indian Languages ──────────────────────────────────────────────────────
+    "hi": "hi-IN-SwaraNeural",        # Hindi (female)
+    "hi-male": "hi-IN-MadhurNeural",  # Hindi (male)
+    "bn": "bn-IN-TanishaaNeural",     # Bengali (female)
+    "bn-male": "bn-IN-BashkarNeural", # Bengali (male)
+    "te": "te-IN-ShrutiNeural",       # Telugu (female)
+    "te-male": "te-IN-MohanNeural",   # Telugu (male)
+    "ta": "ta-IN-PallaviNeural",      # Tamil (female)
+    "ta-male": "ta-IN-ValluvarNeural",# Tamil (male)
+    "kn": "kn-IN-SapnaNeural",        # Kannada (female)
+    "kn-male": "kn-IN-GaganNeural",   # Kannada (male)
+    "ml": "ml-IN-SobhanaNeural",      # Malayalam (female)
+    "ml-male": "ml-IN-MidhunNeural",  # Malayalam (male)
+    "mr": "mr-IN-AarohiNeural",       # Marathi (female)
+    "mr-male": "mr-IN-ManoharNeural", # Marathi (male)
+    "gu": "gu-IN-DhwaniNeural",       # Gujarati (female)
+    "gu-male": "gu-IN-NiranjanNeural",# Gujarati (male)
+    "pa": "pa-IN-GurpreetNeural",     # Punjabi (male — only male available)
+    "ur": "ur-PK-UzmaNeural",         # Urdu (female)
+    "ur-male": "ur-PK-AsadNeural",    # Urdu (male)
+    "ne": "ne-NP-HemkalaNeural",      # Nepali (female)
+    "ne-male": "ne-NP-SagarNeural",   # Nepali (male)
+    "si": "si-LK-ThiliniNeural",      # Sinhala (female)
+    "si-male": "si-LK-SameeraNeural", # Sinhala (male)
+    # ── Arabic & Persian ──────────────────────────────────────────────────────
+    "ar": "ar-SA-ZariyahNeural",      # Arabic (female)
+    "ar-male": "ar-SA-HamedNeural",   # Arabic (male)
+    "fa": "fa-IR-DilaraNeural",       # Persian (female)
+    "fa-male": "fa-IR-FaridNeural",   # Persian (male)
+    # ── European & Other ──────────────────────────────────────────────────────
+    "en": "en-US-JennyNeural",        # English US (female)
+    "en-male": "en-US-GuyNeural",     # English US (male)
+    "en-GB": "en-GB-SoniaNeural",     # English UK
+    "fr": "fr-FR-DeniseNeural",       # French
+    "es": "es-ES-ElviraNeural",       # Spanish
+    "de": "de-DE-KatjaNeural",        # German
+    "tr": "tr-TR-EmelNeural",         # Turkish
+    "ru": "ru-RU-SvetlanaNeural",     # Russian
+    "zh": "zh-CN-XiaoxiaoNeural",     # Chinese
     "it": "it-IT-ElsaNeural",       # Italian
-    "pt": "pt-BR-FranciscaNeural",  # Portuguese
+    "pt": "pt-BR-FranciscaNeural",    # Portuguese
+    "ja": "ja-JP-NanamiNeural",       # Japanese
+    "ko": "ko-KR-SunHiNeural",        # Korean
 }
 
 _URDU_CHARS_RE = _re.compile(r"[\u0679\u0688\u0691\u06BA\u06BE\u06C1\u06C3\u06CC\u06D2]")
 _ARABIC_SCRIPT_RE = _re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
-_DEVANAGARI_RE = _re.compile(r"[\u0900-\u097F]")
+_DEVANAGARI_RE = _re.compile(r"[\u0900-\u097F]")     # Hindi, Marathi, Sanskrit, Nepali
+_BENGALI_RE    = _re.compile(r"[\u0980-\u09FF]")      # Bengali, Assamese
+_GURMUKHI_RE   = _re.compile(r"[\u0A00-\u0A7F]")      # Punjabi
+_GUJARATI_RE   = _re.compile(r"[\u0A80-\u0AFF]")      # Gujarati
+_ORIYA_RE      = _re.compile(r"[\u0B00-\u0B7F]")      # Odia
+_TAMIL_RE      = _re.compile(r"[\u0B80-\u0BFF]")      # Tamil
+_TELUGU_RE     = _re.compile(r"[\u0C00-\u0C7F]")      # Telugu
+_KANNADA_RE    = _re.compile(r"[\u0C80-\u0CFF]")      # Kannada
+_MALAYALAM_RE  = _re.compile(r"[\u0D00-\u0D7F]")      # Malayalam
+_SINHALA_RE    = _re.compile(r"[\u0D80-\u0DFF]")      # Sinhala
 
 
 def _detect_tts_lang(text: str) -> str:
-    """Detect language for TTS voice selection."""
-    urdu_count = len(_URDU_CHARS_RE.findall(text))
-    arabic_count = len(_ARABIC_SCRIPT_RE.findall(text))
-    devanagari_count = len(_DEVANAGARI_RE.findall(text))
-    latin_count = sum(1 for c in text if c.isascii() and c.isalpha())
+    """Detect language for TTS voice selection.
 
+    Supports all major Indian scripts via Unicode range detection,
+    plus Arabic-script languages (Urdu, Arabic, Persian) and
+    Latin-script languages via keyword matching.
+    """
+    # Count characters in each script
+    urdu_count    = len(_URDU_CHARS_RE.findall(text))
+    arabic_count  = len(_ARABIC_SCRIPT_RE.findall(text))
+    deva_count    = len(_DEVANAGARI_RE.findall(text))
+    bengali_count = len(_BENGALI_RE.findall(text))
+    gurmukhi_count= len(_GURMUKHI_RE.findall(text))
+    gujarati_count= len(_GUJARATI_RE.findall(text))
+    oriya_count   = len(_ORIYA_RE.findall(text))
+    tamil_count   = len(_TAMIL_RE.findall(text))
+    telugu_count  = len(_TELUGU_RE.findall(text))
+    kannada_count = len(_KANNADA_RE.findall(text))
+    malayalam_count = len(_MALAYALAM_RE.findall(text))
+    sinhala_count = len(_SINHALA_RE.findall(text))
+    latin_count   = sum(1 for c in text if c.isascii() and c.isalpha())
+
+    # ── Unique-script Indian languages (each has its own Unicode block) ───────
+    if telugu_count > latin_count and telugu_count > 2:
+        return "te"
+    if kannada_count > latin_count and kannada_count > 2:
+        return "kn"
+    if malayalam_count > latin_count and malayalam_count > 2:
+        return "ml"
+    if tamil_count > latin_count and tamil_count > 2:
+        return "ta"
+    if bengali_count > latin_count and bengali_count > 2:
+        return "bn"
+    if gujarati_count > latin_count and gujarati_count > 2:
+        return "gu"
+    if gurmukhi_count > latin_count and gurmukhi_count > 2:
+        return "pa"
+    if oriya_count > latin_count and oriya_count > 2:
+        return "hi"  # No Odia voice in Edge TTS — fallback to Hindi
+    if sinhala_count > latin_count and sinhala_count > 2:
+        return "si"
+
+    # ── Devanagari languages (Hindi, Marathi, Nepali share the same script) ───
+    if deva_count > latin_count and deva_count > 2:
+        # Try to distinguish Marathi vs Nepali vs Hindi via common words
+        # Marathi common words
+        if _re.search(r"(आहे|आणि|नाही|काय|होते|मला|तुम्ही|करत|आम्ही|त्या)", text):
+            return "mr"
+        # Nepali common words
+        if _re.search(r"(छ|हुन्छ|गर्न|भएको|तपाईं|हामी|यो|गर्दछ|भन्ने)", text):
+            return "ne"
+        return "hi"  # Default Devanagari → Hindi
+
+    # ── Arabic-script languages (Urdu, Arabic, Persian) ───────────────────────
     if urdu_count >= 2 or (urdu_count >= 1 and arabic_count > latin_count * 2):
         return "ur"
+    persian_chars = len(_re.findall(r"[\u06AF\u0686\u067E\u0698]", text))
+    if persian_chars >= 2 and arabic_count > latin_count:
+        return "fa"
     if arabic_count > latin_count and arabic_count > 3:
         return "ar"
-    if devanagari_count > latin_count:
-        return "hi"
 
+    # ── Latin-script language detection via common words ───────────────────────
     lower = text.lower()
     if _re.search(r"\b(le|la|les|une?|est|sont|avec|dans|pour)\b", lower):
         return "fr"

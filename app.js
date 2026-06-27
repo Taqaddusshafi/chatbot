@@ -528,9 +528,9 @@ function showWelcome() {
     const container = document.getElementById('messagesContainer');
     container.innerHTML = `
       <div class="welcome" id="welcomeScreen">
-        <div class="welcome__icon">🦙</div>
+        <div class="welcome__icon">🤖</div>
         <h2>Hello! I'm your AI Assistant</h2>
-        <p>Powered by LLaMA 3.1 with Arabic ↔ English translation. Ask me anything or switch to translation mode.</p>
+        <p>Powered by DexaiTech with Arabic ↔ English translation. Ask me anything or switch to translation mode.</p>
         <div class="welcome__suggestions">
           <div class="suggestion-chip" onclick="sendSuggestion('Tell me about the history of Arabic calligraphy')">📜 Arabic calligraphy history</div>
           <div class="suggestion-chip" onclick="sendSuggestion('Translate: Good morning, how are you?')">🌐 Translate a greeting</div>
