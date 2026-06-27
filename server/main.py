@@ -9,9 +9,9 @@ import logging
 import time
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
@@ -243,6 +243,88 @@ async def voice_stt(
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"STT engine unreachable: {exc}",
+        )
+
+
+# ── OpenAI-compatible surface (for AI gateways) ──────────────────────────────
+# Standard /v1/chat/completions + /v1/models so any AI gateway can register this
+# service as an OpenAI-style provider. Transparent proxy to vLLM; only defaults
+# the model and injects the chat system prompt when the caller omits one.
+
+
+@app.get("/v1/models")
+async def openai_models():
+    """OpenAI-style model list, proxied from vLLM with a configured fallback."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{settings.vllm_base_url}/models",
+                headers={"Authorization": f"Bearer {settings.vllm_api_key}"},
+            )
+            r.raise_for_status()
+            return JSONResponse(content=r.json())
+    except Exception:
+        return {
+            "object": "list",
+            "data": [
+                {"id": settings.vllm_model, "object": "model", "owned_by": "vllm"}
+            ],
+        }
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(request: Request):
+    """OpenAI-compatible chat completions — transparent proxy to vLLM."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+
+    body.setdefault("model", settings.vllm_model)
+
+    messages = body.get("messages") or []
+    if not messages or messages[0].get("role") != "system":
+        body["messages"] = [
+            {"role": "system", "content": settings.chat_system_prompt},
+            *messages,
+        ]
+
+    stream = bool(body.get("stream", False))
+    url = f"{settings.vllm_base_url.rstrip('/')}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {settings.vllm_api_key}",
+    }
+
+    if stream:
+
+        async def relay():
+            async with httpx.AsyncClient(timeout=settings.vllm_timeout) as client:
+                async with client.stream(
+                    "POST", url, json=body, headers=headers
+                ) as resp:
+                    resp.raise_for_status()
+                    async for chunk in resp.aiter_raw():
+                        yield chunk
+
+        return StreamingResponse(relay(), media_type="text/event-stream")
+
+    try:
+        async with httpx.AsyncClient(timeout=settings.vllm_timeout) as client:
+            resp = await client.post(url, json=body, headers=headers)
+            return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=f"LLM engine error: {exc.response.text[:500]}",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"LLM unreachable: {exc}",
         )
 
 

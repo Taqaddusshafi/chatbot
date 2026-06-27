@@ -26,6 +26,7 @@
     { "src": "/app.js", "dest": "/app.js" },
     { "src": "/favicon.svg", "dest": "/favicon.svg" },
     { "src": "/api/(.*)", "dest": "/api/index.py" },
+    { "src": "/v1/(.*)", "dest": "/api/index.py" },
     { "src": "/(.*)", "dest": "/index.html" }
   ]
 }

@@ -1,6 +1,6 @@
 /* ══════════════════════════════════════════════════════════════════════════════
    AI Chatbot — Application Logic
-   Chat engine, voice I/O, translation, conversation management
+   Chat engine, voice I/O, TTS, translation, conversation management
    ══════════════════════════════════════════════════════════════════════════════ */
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -465,6 +465,14 @@ function createMessageElement(msg, index) {
   copyBtn.onclick = () => copyMessage(msg.content, copyBtn);
   actions.appendChild(copyBtn);
 
+  // Speak button (TTS)
+  const speakBtn = document.createElement('button');
+  speakBtn.className = 'msg-action-btn btn-speak';
+  speakBtn.title = 'Speak';
+  speakBtn.textContent = '🔊';
+  speakBtn.onclick = () => speakMessage(msg.content, speakBtn);
+  actions.appendChild(speakBtn);
+
   content.appendChild(actions);
 
   wrapper.appendChild(avatar);
@@ -850,4 +858,87 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+// ── Text-to-Speech (TTS) ──────────────────────────────────────────────────────
+let activeSpeakBtn = null; // Track the currently speaking button
+
+function speakMessage(text, btn) {
+  const synth = window.speechSynthesis;
+
+  // If already speaking — stop and reset
+  if (synth.speaking) {
+    synth.cancel();
+    resetSpeakButton();
+    // If the same button was clicked, just stop (toggle off)
+    if (activeSpeakBtn === btn) {
+      activeSpeakBtn = null;
+      return;
+    }
+  }
+
+  // Strip markdown-like formatting for a cleaner read
+  const cleanText = text
+    .replace(/```[\s\S]*?```/g, ' code block omitted ')  // code blocks
+    .replace(/`([^`]+)`/g, '$1')                          // inline code
+    .replace(/\*\*(.+?)\*\*/g, '$1')                      // bold
+    .replace(/\*(.+?)\*/g, '$1')                          // italic
+    .replace(/^#{1,6}\s+/gm, '')                          // headings
+    .replace(/^[>*-]\s+/gm, '')                           // lists / blockquotes
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')              // links
+    .trim();
+
+  if (!cleanText) return;
+
+  const utterance = new SpeechSynthesisUtterance(cleanText);
+
+  // Auto-detect Arabic and pick an appropriate voice
+  const isArabic = detectArabic(cleanText);
+  utterance.lang = isArabic ? 'ar' : 'en-US';
+
+  // Try to pick a good voice
+  const voices = synth.getVoices();
+  if (voices.length > 0) {
+    const langPrefix = isArabic ? 'ar' : 'en';
+    const preferred = voices.find(v => v.lang.startsWith(langPrefix) && v.localService);
+    const fallback  = voices.find(v => v.lang.startsWith(langPrefix));
+    if (preferred) utterance.voice = preferred;
+    else if (fallback) utterance.voice = fallback;
+  }
+
+  utterance.rate = 1;
+  utterance.pitch = 1;
+
+  // Update button to active state
+  activeSpeakBtn = btn;
+  btn.classList.add('speaking');
+  btn.textContent = '⏹';
+  btn.title = 'Stop speaking';
+
+  utterance.onend = () => {
+    resetSpeakButton();
+    activeSpeakBtn = null;
+  };
+
+  utterance.onerror = () => {
+    resetSpeakButton();
+    activeSpeakBtn = null;
+  };
+
+  synth.speak(utterance);
+}
+
+function resetSpeakButton() {
+  if (activeSpeakBtn) {
+    activeSpeakBtn.classList.remove('speaking');
+    activeSpeakBtn.textContent = '🔊';
+    activeSpeakBtn.title = 'Speak';
+  }
+}
+
+// Pre-load voices (some browsers load them async)
+if (window.speechSynthesis) {
+  window.speechSynthesis.onvoiceschanged = () => {
+    window.speechSynthesis.getVoices();
+  };
 }

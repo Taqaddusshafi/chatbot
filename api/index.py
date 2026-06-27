@@ -16,9 +16,9 @@ import re
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -131,6 +131,96 @@ async def engine_health():
         except Exception as exc:
             results[label] = {"status": "unreachable", "error": str(exc)}
     return results
+
+
+# ── OpenAI-compatible surface (for AI gateways) ──────────────────────────────
+# Exposes the standard /v1/chat/completions and /v1/models contract so any AI
+# gateway (Kong AI Gateway, Portkey, LiteLLM, Cloudflare AI Gateway, OpenRouter,
+# etc.) can register this microservice as an OpenAI-style provider. Requests are
+# proxied to the underlying vLLM engine (already OpenAI-format); we only default
+# the model and inject the chat system prompt when the caller omits one.
+
+
+@app.get("/v1/models")
+async def openai_models():
+    """OpenAI-style model list. Proxies vLLM, falling back to the configured model."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{VLLM_BASE_URL}/models",
+                headers={"Authorization": f"Bearer {VLLM_API_KEY}"},
+            )
+            r.raise_for_status()
+            return JSONResponse(content=r.json())
+    except Exception:
+        # Synthesize a minimal OpenAI-compatible response if vLLM is unreachable.
+        return {
+            "object": "list",
+            "data": [{"id": VLLM_MODEL, "object": "model", "owned_by": "vllm"}],
+        }
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(request: Request):
+    """OpenAI-compatible chat completions — transparent proxy to vLLM.
+
+    Supports both streaming (text/event-stream) and non-streaming. The caller's
+    request body is forwarded verbatim, so usage stats, ids, and finish_reason
+    are preserved exactly as an AI gateway expects.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+
+    body.setdefault("model", VLLM_MODEL)
+
+    # Inject the default system prompt only when the caller hasn't set one.
+    messages = body.get("messages") or []
+    if not messages or messages[0].get("role") != "system":
+        body["messages"] = [
+            {"role": "system", "content": CHAT_SYSTEM_PROMPT},
+            *messages,
+        ]
+
+    stream = bool(body.get("stream", False))
+    url = f"{VLLM_BASE_URL}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {VLLM_API_KEY}",
+    }
+
+    if stream:
+
+        async def relay():
+            async with httpx.AsyncClient(timeout=VLLM_TIMEOUT) as client:
+                async with client.stream(
+                    "POST", url, json=body, headers=headers
+                ) as resp:
+                    resp.raise_for_status()
+                    # Pass vLLM's OpenAI SSE chunks through untouched.
+                    async for chunk in resp.aiter_raw():
+                        yield chunk
+
+        return StreamingResponse(relay(), media_type="text/event-stream")
+
+    try:
+        async with httpx.AsyncClient(timeout=VLLM_TIMEOUT) as client:
+            resp = await client.post(url, json=body, headers=headers)
+            return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=f"LLM engine error: {exc.response.text[:500]}",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"LLM unreachable: {exc}",
+        )
 
 
 # ── Chat ──────────────────────────────────────────────────────────────────────

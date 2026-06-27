@@ -121,10 +121,50 @@ curl -X POST http://localhost:8008/api/translate \
 
 ---
 
+## 🔌 AI Gateway Integration (OpenAI-compatible)
+
+This service is a **stateless microservice** and exposes a standard **OpenAI-compatible** surface, so any AI gateway (Kong AI Gateway, Portkey, LiteLLM, Cloudflare AI Gateway, OpenRouter, LangChain, …) can register it as an OpenAI-style provider.
+
+| Endpoint | Method | Contract |
+| :--- | :--- | :--- |
+| `/v1/chat/completions` | `POST` | OpenAI chat completions — streaming **and** non-streaming. Transparent proxy to vLLM, so `usage`, `id`, and `finish_reason` are preserved. |
+| `/v1/models` | `GET` | OpenAI model list (proxied from vLLM). |
+
+The default chat system prompt is injected **only when the caller does not provide a `system` message**, so gateways retain full control of behavior.
+
+Point your gateway's provider **base URL** at this service and use the OpenAI SDK directly:
+
+```bash
+# Non-streaming
+curl -X POST https://<your-app>.vercel.app/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ANY" \
+  -d '{"model":"meta-llama/Llama-3.1-8B-Instruct","messages":[{"role":"user","content":"Hello"}]}'
+
+# Streaming
+curl -N -X POST https://<your-app>.vercel.app/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Hello"}],"stream":true}'
+```
+
+```python
+# OpenAI SDK — just change base_url to this microservice
+from openai import OpenAI
+client = OpenAI(base_url="https://<your-app>.vercel.app/v1", api_key="ANY")
+resp = client.chat.completions.create(
+    model="meta-llama/Llama-3.1-8B-Instruct",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+```
+
+> The `/api/*` endpoints (`/api/chat`, `/api/translate`, `/api/voice/stt`) remain available for the bundled web UI; `/v1/*` is the gateway-facing contract.
+
+---
+
 ## ✨ Key Features Included
 
 * **Streaming SSE Chat:** True word-by-word real-time generation.
 * **Premium Glassmorphic UI:** Smooth dark mode layouts, typography (Inter & Noto Sans Arabic), micro-animations, and dynamic status dots.
 * **RTL Language Detection:** Automatic right-to-left layout formatting for Arabic messages.
 * **Integrated translation mode:** Simple toggle to swap between conversational chatbot and high-fidelity translator.
-* **Auto-Voice capability:** Toggle auto-speech on/off in Settings, or use on-demand buttons per bubble.
+* **Voice input (STT):** Record from the mic and auto-transcribe to text via the STT engine.
