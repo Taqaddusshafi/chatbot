@@ -879,7 +879,7 @@ async function speakMessage(text, btn) {
     return;
   }
 
-  // Strip markdown for cleaner speech
+  // Strip markdown and divider lines for cleaner speech
   const cleanText = text
     .replace(/```[\s\S]*?```/g, ' code block omitted ')
     .replace(/`([^`]+)`/g, '$1')
@@ -888,6 +888,8 @@ async function speakMessage(text, btn) {
     .replace(/^#{1,6}\s+/gm, '')
     .replace(/^[>*-]\s+/gm, '')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/[=\-_*~#]{2,}/g, '')  // Strip repeated formatting characters like ===, ---, ***, etc.
+    .replace(/\s+/g, ' ')            // Collapse consecutive spaces/newlines into a single space
     .trim();
 
   if (!cleanText) return;
