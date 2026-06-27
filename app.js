@@ -863,6 +863,144 @@ function escapeHtml(text) {
 // ── Text-to-Speech (TTS) ──────────────────────────────────────────────────────
 let activeSpeakBtn = null; // Track the currently speaking button
 
+/**
+ * Detect the dominant language/script of the text.
+ * Returns a BCP-47 lang code. Supports Urdu, Arabic, Hindi, and many more.
+ */
+function detectLanguage(text) {
+  // Count characters in various Unicode script ranges
+  const counts = {
+    // Urdu-specific characters (Urdu uses Arabic script + extra chars like ے ہ ٹ ڈ ڑ ں)
+    urdu:       (text.match(/[\u0679\u0688\u0691\u06BA\u06BE\u06C1\u06C3\u06CC\u06D2]/g) || []).length,
+    // General Arabic script (shared by Arabic, Urdu, Persian, etc.)
+    arabicScript: (text.match(/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/g) || []).length,
+    // Devanagari (Hindi, Marathi, Sanskrit)
+    devanagari: (text.match(/[\u0900-\u097F]/g) || []).length,
+    // Bengali
+    bengali:    (text.match(/[\u0980-\u09FF]/g) || []).length,
+    // Gurmukhi (Punjabi)
+    gurmukhi:   (text.match(/[\u0A00-\u0A7F]/g) || []).length,
+    // Tamil
+    tamil:      (text.match(/[\u0B80-\u0BFF]/g) || []).length,
+    // Telugu
+    telugu:     (text.match(/[\u0C00-\u0C7F]/g) || []).length,
+    // CJK (Chinese/Japanese/Korean)
+    cjk:        (text.match(/[\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/g) || []).length,
+    // Cyrillic (Russian, etc.)
+    cyrillic:   (text.match(/[\u0400-\u04FF]/g) || []).length,
+    // Latin (English, French, Spanish, etc.)
+    latin:      (text.match(/[a-zA-Z\u00C0-\u024F]/g) || []).length,
+  };
+
+  // If Urdu-specific chars are present alongside Arabic script → it's Urdu
+  if (counts.urdu >= 2 || (counts.urdu >= 1 && counts.arabicScript > counts.latin * 2)) {
+    return 'ur';
+  }
+
+  // Persian has chars like گ چ پ ژ (also in Arabic range but less in Arabic)
+  const persianChars = (text.match(/[\u06AF\u0686\u067E\u0698]/g) || []).length;
+  if (persianChars >= 2 && counts.arabicScript > counts.latin) {
+    return 'fa';
+  }
+
+  // Pure Arabic (no Urdu/Persian markers)
+  if (counts.arabicScript > counts.latin && counts.arabicScript > 3) {
+    return 'ar';
+  }
+
+  if (counts.devanagari > counts.latin) return 'hi';
+  if (counts.bengali > counts.latin) return 'bn';
+  if (counts.gurmukhi > counts.latin) return 'pa';
+  if (counts.tamil > counts.latin) return 'ta';
+  if (counts.telugu > counts.latin) return 'te';
+  if (counts.cyrillic > counts.latin) return 'ru';
+  if (counts.cjk > 3) return 'zh';
+
+  // Latin-based language detection via common words
+  const lower = text.toLowerCase();
+  if (/\b(le|la|les|une?|est|sont|avec|dans|pour|que|qui|mais|très)\b/.test(lower)) return 'fr';
+  if (/\b(el|los|las|una?|es|son|con|para|que|pero|más|como|muy)\b/.test(lower)) return 'es';
+  if (/\b(der|die|das|und|ist|ein|eine|mit|auf|für|nicht|auch)\b/.test(lower)) return 'de';
+  if (/\b(bir|ve|bu|ile|için|olan|gibi|daha|çok)\b/.test(lower)) return 'tr';
+  if (/\b(il|lo|la|gli|una?|è|sono|con|per|che|non|più)\b/.test(lower)) return 'it';
+  if (/\b(um|uma|os|as|é|são|com|para|que|não|mais)\b/.test(lower)) return 'pt';
+
+  return 'en-US';
+}
+
+/**
+ * Pick the best available voice for a language.
+ * Prefers premium/natural voices over robotic system defaults.
+ */
+function pickBestVoice(voices, lang) {
+  if (!voices.length) return null;
+
+  const langPrefix = lang.split('-')[0]; // 'en-US' → 'en', 'ur' → 'ur'
+
+  // Get all voices matching this language
+  const matching = voices.filter(v =>
+    v.lang.startsWith(langPrefix) || v.lang.startsWith(lang)
+  );
+
+  if (matching.length === 0) {
+    // Fallback: for Urdu, try Hindi voices (intelligible)
+    if (langPrefix === 'ur') {
+      const hindiFallback = voices.filter(v => v.lang.startsWith('hi'));
+      if (hindiFallback.length) return pickPremiumVoice(hindiFallback);
+    }
+    // For Persian, try Arabic
+    if (langPrefix === 'fa') {
+      const arabicFallback = voices.filter(v => v.lang.startsWith('ar'));
+      if (arabicFallback.length) return pickPremiumVoice(arabicFallback);
+    }
+    return null;
+  }
+
+  return pickPremiumVoice(matching);
+}
+
+/**
+ * From a list of matching voices, pick the most natural-sounding one.
+ * Premium voices (Google, Microsoft Neural, Apple's Samantha/Siri) sound
+ * significantly better than generic system voices.
+ */
+function pickPremiumVoice(voices) {
+  if (!voices.length) return null;
+
+  // Score each voice — higher = better quality
+  const scored = voices.map(v => {
+    let score = 0;
+    const name = v.name.toLowerCase();
+
+    // Premium cloud voices (best quality)
+    if (name.includes('google') && !name.includes('espeak')) score += 30;
+    if (name.includes('microsoft') && name.includes('neural')) score += 30;
+    if (name.includes('microsoft') && name.includes('online')) score += 25;
+    if (name.includes('natural')) score += 20;
+    if (name.includes('enhanced')) score += 15;
+    if (name.includes('premium')) score += 15;
+
+    // Apple high-quality voices
+    if (name.includes('samantha')) score += 20;
+    if (name.includes('karen')) score += 18;
+    if (name.includes('daniel')) score += 18;
+    if (name.includes('siri')) score += 15;
+    if (name.includes('compact')) score -= 10;
+
+    // Penalize known robotic engines
+    if (name.includes('espeak')) score -= 20;
+    if (name.includes('mbrola')) score -= 15;
+
+    // Non-local (cloud) voices tend to be higher quality
+    if (!v.localService) score += 5;
+
+    return { voice: v, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0].voice;
+}
+
 function speakMessage(text, btn) {
   const synth = window.speechSynthesis;
 
@@ -892,22 +1030,18 @@ function speakMessage(text, btn) {
 
   const utterance = new SpeechSynthesisUtterance(cleanText);
 
-  // Auto-detect Arabic and pick an appropriate voice
-  const isArabic = detectArabic(cleanText);
-  utterance.lang = isArabic ? 'ar' : 'en-US';
+  // Auto-detect language (supports Urdu, Arabic, Hindi, and many more)
+  const detectedLang = detectLanguage(cleanText);
+  utterance.lang = detectedLang;
 
-  // Try to pick a good voice
+  // Pick the best (most natural) voice available
   const voices = synth.getVoices();
-  if (voices.length > 0) {
-    const langPrefix = isArabic ? 'ar' : 'en';
-    const preferred = voices.find(v => v.lang.startsWith(langPrefix) && v.localService);
-    const fallback  = voices.find(v => v.lang.startsWith(langPrefix));
-    if (preferred) utterance.voice = preferred;
-    else if (fallback) utterance.voice = fallback;
-  }
+  const bestVoice = pickBestVoice(voices, detectedLang);
+  if (bestVoice) utterance.voice = bestVoice;
 
-  utterance.rate = 1;
-  utterance.pitch = 1;
+  // Slightly slower rate sounds more natural and human
+  utterance.rate = 0.95;
+  utterance.pitch = 1.0;
 
   // Update button to active state
   activeSpeakBtn = btn;
@@ -942,3 +1076,4 @@ if (window.speechSynthesis) {
     window.speechSynthesis.getVoices();
   };
 }
+
