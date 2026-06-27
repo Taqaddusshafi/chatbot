@@ -234,9 +234,8 @@ async def voice_tts(
     voice: str = Form(default=None),
     gender: str = Form(default="female"),
 ):
-    """Generate natural speech using Microsoft Edge Neural TTS."""
+    """Generate natural speech using Microsoft Edge Neural TTS (streaming)."""
     import edge_tts
-    import io
 
     lang = language or _detect_tts_lang(text)
 
@@ -251,28 +250,25 @@ async def voice_tts(
 
     logger.info("Edge TTS → voice=%s lang=%s text=%d chars", selected_voice, lang, len(text))
 
-    try:
-        communicate = edge_tts.Communicate(text, selected_voice)
-        audio_data = io.BytesIO()
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio_data.write(chunk["data"])
+    async def audio_stream():
+        """Yield audio chunks as they arrive from Edge TTS."""
+        try:
+            communicate = edge_tts.Communicate(text, selected_voice)
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    yield chunk["data"]
+        except Exception as exc:
+            logger.error("Edge TTS stream error: %s", exc)
+            return
 
-        audio_data.seek(0)
-        return Response(
-            content=audio_data.read(),
-            media_type="audio/mpeg",
-            headers={
-                "X-TTS-Voice": selected_voice,
-                "X-TTS-Language": lang,
-            },
-        )
-    except Exception as exc:
-        logger.error("Edge TTS error: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Edge TTS error: {exc}",
-        )
+    return StreamingResponse(
+        audio_stream(),
+        media_type="audio/mpeg",
+        headers={
+            "X-TTS-Voice": selected_voice,
+            "X-TTS-Language": lang,
+        },
+    )
 
 
 # ── Voice proxy — STT ─────────────────────────────────────────────────────────

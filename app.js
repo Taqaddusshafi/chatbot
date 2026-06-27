@@ -860,34 +860,23 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-// ── Text-to-Speech (TTS) via Server Edge TTS ──────────────────────────────────
+// ── Text-to-Speech (TTS) via Server Edge TTS — Streaming Playback ─────────────
 let activeSpeakBtn = null;
-let currentAudio = null;  // HTMLAudioElement for server TTS
+let currentAudio = null;
+let currentMediaSource = null;
 
 /**
- * Speak a message using the server's Edge Neural TTS.
- * Falls back to browser SpeechSynthesis if server is unavailable.
+ * Speak a message using the server's Edge Neural TTS with streaming playback.
+ * Audio starts playing as soon as the first chunk arrives (~200ms).
  */
 async function speakMessage(text, btn) {
-  // If already playing — stop and reset
-  if (currentAudio && !currentAudio.paused) {
-    currentAudio.pause();
-    currentAudio.currentTime = 0;
-    currentAudio = null;
-    resetSpeakButton();
-    if (activeSpeakBtn === btn) {
-      activeSpeakBtn = null;
-      return;
-    }
-  }
-  // Also stop browser TTS if active
-  if (window.speechSynthesis && window.speechSynthesis.speaking) {
-    window.speechSynthesis.cancel();
-    resetSpeakButton();
-    if (activeSpeakBtn === btn) {
-      activeSpeakBtn = null;
-      return;
-    }
+  // Stop any current playback
+  stopCurrentPlayback();
+
+  // If same button clicked, just toggle off
+  if (activeSpeakBtn === btn) {
+    activeSpeakBtn = null;
+    return;
   }
 
   // Strip markdown for cleaner speech
@@ -910,7 +899,6 @@ async function speakMessage(text, btn) {
   btn.title = 'Stop speaking';
 
   try {
-    // Call server Edge TTS
     const formData = new FormData();
     formData.append('text', cleanText);
 
@@ -919,46 +907,146 @@ async function speakMessage(text, btn) {
       body: formData,
     });
 
-    if (!resp.ok) {
-      throw new Error(`TTS server error: ${resp.status}`);
+    if (!resp.ok) throw new Error(`TTS server error: ${resp.status}`);
+
+    // Try streaming playback (Chrome, Edge, Safari support MP3 in MediaSource)
+    const canStream = window.MediaSource
+      && typeof MediaSource.isTypeSupported === 'function'
+      && MediaSource.isTypeSupported('audio/mpeg');
+
+    if (canStream && resp.body) {
+      await streamingPlayback(resp.body);
+    } else {
+      // Fallback: wait for full blob (Firefox, older browsers)
+      const blob = await resp.blob();
+      playAudioBlob(blob);
     }
-
-    const audioBlob = await resp.blob();
-    const audioUrl = URL.createObjectURL(audioBlob);
-
-    currentAudio = new Audio(audioUrl);
-
-    currentAudio.onended = () => {
-      URL.revokeObjectURL(audioUrl);
-      currentAudio = null;
-      resetSpeakButton();
-      activeSpeakBtn = null;
-    };
-
-    currentAudio.onerror = () => {
-      URL.revokeObjectURL(audioUrl);
-      currentAudio = null;
-      resetSpeakButton();
-      activeSpeakBtn = null;
-    };
-
-    await currentAudio.play();
-
   } catch (err) {
     console.warn('Server TTS failed, falling back to browser:', err.message);
-    // Fallback to browser SpeechSynthesis
-    fallbackBrowserTTS(cleanText, btn);
+    fallbackBrowserTTS(cleanText);
   }
 }
 
 /**
- * Fallback: use browser's built-in SpeechSynthesis if server TTS fails.
+ * Stream audio via MediaSource — starts playing within ~200ms.
  */
-function fallbackBrowserTTS(text, btn) {
+async function streamingPlayback(readableStream) {
+  return new Promise((resolve, reject) => {
+    const mediaSource = new MediaSource();
+    currentMediaSource = mediaSource;
+
+    const audio = new Audio();
+    audio.src = URL.createObjectURL(mediaSource);
+    currentAudio = audio;
+
+    // Clean up when audio finishes
+    audio.onended = () => {
+      cleanupPlayback();
+      resolve();
+    };
+    audio.onerror = () => {
+      cleanupPlayback();
+      reject(new Error('Audio playback error'));
+    };
+
+    mediaSource.addEventListener('sourceopen', async () => {
+      let sourceBuffer;
+      try {
+        sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
+      } catch (e) {
+        // Fallback if addSourceBuffer fails
+        cleanupPlayback();
+        reject(e);
+        return;
+      }
+
+      const reader = readableStream.getReader();
+      let hasStartedPlaying = false;
+      let pendingChunks = [];
+      let streamDone = false;
+
+      // Append next chunk from queue
+      function appendNext() {
+        if (sourceBuffer.updating || pendingChunks.length === 0) {
+          // If stream is done and no more chunks, end the stream
+          if (streamDone && pendingChunks.length === 0 && !sourceBuffer.updating) {
+            try {
+              if (mediaSource.readyState === 'open') {
+                mediaSource.endOfStream();
+              }
+            } catch {}
+          }
+          return;
+        }
+        const chunk = pendingChunks.shift();
+        try {
+          sourceBuffer.appendBuffer(chunk);
+        } catch {
+          // Buffer full or other error — just skip
+        }
+      }
+
+      sourceBuffer.addEventListener('updateend', () => {
+        // Start playing as soon as the first chunk is appended
+        if (!hasStartedPlaying && audio.paused) {
+          audio.play().catch(() => {});
+          hasStartedPlaying = true;
+        }
+        appendNext();
+      });
+
+      // Read chunks from the stream and queue them
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            streamDone = true;
+            // If sourceBuffer isn't busy, end the stream now
+            if (!sourceBuffer.updating && pendingChunks.length === 0) {
+              try {
+                if (mediaSource.readyState === 'open') {
+                  mediaSource.endOfStream();
+                }
+              } catch {}
+            }
+            break;
+          }
+          pendingChunks.push(value);
+          appendNext();
+        }
+      } catch {
+        streamDone = true;
+      }
+    });
+  });
+}
+
+/**
+ * Play audio from a complete blob (fallback for browsers without MediaSource MP3).
+ */
+function playAudioBlob(blob) {
+  const audioUrl = URL.createObjectURL(blob);
+  const audio = new Audio(audioUrl);
+  currentAudio = audio;
+
+  audio.onended = () => {
+    URL.revokeObjectURL(audioUrl);
+    cleanupPlayback();
+  };
+  audio.onerror = () => {
+    URL.revokeObjectURL(audioUrl);
+    cleanupPlayback();
+  };
+  audio.play().catch(() => cleanupPlayback());
+}
+
+/**
+ * Fallback: browser SpeechSynthesis if server TTS is unreachable.
+ */
+function fallbackBrowserTTS(text) {
   const synth = window.speechSynthesis;
   if (!synth) {
-    resetSpeakButton();
-    activeSpeakBtn = null;
+    cleanupPlayback();
     return;
   }
 
@@ -972,17 +1060,44 @@ function fallbackBrowserTTS(text, btn) {
   const voice = voices.find(v => v.lang.startsWith(langPrefix));
   if (voice) utterance.voice = voice;
 
-  utterance.onend = () => {
-    resetSpeakButton();
-    activeSpeakBtn = null;
-  };
-
-  utterance.onerror = () => {
-    resetSpeakButton();
-    activeSpeakBtn = null;
-  };
-
+  utterance.onend = () => cleanupPlayback();
+  utterance.onerror = () => cleanupPlayback();
   synth.speak(utterance);
+}
+
+/**
+ * Stop any currently playing audio.
+ */
+function stopCurrentPlayback() {
+  // Stop HTML5 audio
+  if (currentAudio) {
+    currentAudio.pause();
+    if (currentAudio.src) {
+      URL.revokeObjectURL(currentAudio.src);
+    }
+    currentAudio = null;
+  }
+  // Close MediaSource
+  if (currentMediaSource && currentMediaSource.readyState === 'open') {
+    try { currentMediaSource.endOfStream(); } catch {}
+  }
+  currentMediaSource = null;
+
+  // Stop browser TTS
+  if (window.speechSynthesis && window.speechSynthesis.speaking) {
+    window.speechSynthesis.cancel();
+  }
+  resetSpeakButton();
+}
+
+/**
+ * Reset speak button visuals and clear tracking state.
+ */
+function cleanupPlayback() {
+  currentAudio = null;
+  currentMediaSource = null;
+  resetSpeakButton();
+  activeSpeakBtn = null;
 }
 
 function resetSpeakButton() {
@@ -992,4 +1107,5 @@ function resetSpeakButton() {
     activeSpeakBtn.title = 'Speak';
   }
 }
+
 
