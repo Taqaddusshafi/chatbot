@@ -4,3 +4,4 @@ httpx
 python-dotenv
 pydantic-settings
 sse-starlette
+edge-tts

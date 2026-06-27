@@ -3,3 +3,4 @@ httpx
 pydantic
 python-multipart
 sse-starlette
+edge-tts

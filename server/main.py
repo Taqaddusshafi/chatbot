@@ -165,38 +165,113 @@ async def translate(request: TranslateRequest):
         )
 
 
-# ── Voice proxy — TTS ─────────────────────────────────────────────────────────
+# ── Voice TTS — Edge TTS (Microsoft Neural voices) ────────────────────────────
+
+import re as _re
+
+# Language → best neural voice mapping
+EDGE_TTS_VOICES = {
+    "ur": "ur-PK-UzmaNeural",      # Urdu (female, natural)
+    "ur-male": "ur-PK-AsadNeural",  # Urdu (male)
+    "ar": "ar-SA-ZariyahNeural",    # Arabic (female)
+    "ar-male": "ar-SA-HamedNeural", # Arabic (male)
+    "hi": "hi-IN-SwaraNeural",      # Hindi (female)
+    "hi-male": "hi-IN-MadhurNeural",# Hindi (male)
+    "en": "en-US-JennyNeural",      # English US (female)
+    "en-male": "en-US-GuyNeural",   # English US (male)
+    "en-GB": "en-GB-SoniaNeural",   # English UK
+    "fr": "fr-FR-DeniseNeural",     # French
+    "es": "es-ES-ElviraNeural",     # Spanish
+    "de": "de-DE-KatjaNeural",      # German
+    "tr": "tr-TR-EmelNeural",       # Turkish
+    "bn": "bn-IN-TanishaaNeural",   # Bengali
+    "ta": "ta-IN-PallaviNeural",    # Tamil
+    "te": "te-IN-ShrutiNeural",     # Telugu
+    "pa": "pa-IN-GurpreetNeural",   # Punjabi
+    "ru": "ru-RU-SvetlanaNeural",   # Russian
+    "zh": "zh-CN-XiaoxiaoNeural",   # Chinese
+    "fa": "fa-IR-DilaraNeural",     # Persian
+    "it": "it-IT-ElsaNeural",       # Italian
+    "pt": "pt-BR-FranciscaNeural",  # Portuguese
+}
+
+_URDU_CHARS_RE = _re.compile(r"[\u0679\u0688\u0691\u06BA\u06BE\u06C1\u06C3\u06CC\u06D2]")
+_ARABIC_SCRIPT_RE = _re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
+_DEVANAGARI_RE = _re.compile(r"[\u0900-\u097F]")
+
+
+def _detect_tts_lang(text: str) -> str:
+    """Detect language for TTS voice selection."""
+    urdu_count = len(_URDU_CHARS_RE.findall(text))
+    arabic_count = len(_ARABIC_SCRIPT_RE.findall(text))
+    devanagari_count = len(_DEVANAGARI_RE.findall(text))
+    latin_count = sum(1 for c in text if c.isascii() and c.isalpha())
+
+    if urdu_count >= 2 or (urdu_count >= 1 and arabic_count > latin_count * 2):
+        return "ur"
+    if arabic_count > latin_count and arabic_count > 3:
+        return "ar"
+    if devanagari_count > latin_count:
+        return "hi"
+
+    lower = text.lower()
+    if _re.search(r"\b(le|la|les|une?|est|sont|avec|dans|pour)\b", lower):
+        return "fr"
+    if _re.search(r"\b(el|los|las|una?|es|son|con|para|pero)\b", lower):
+        return "es"
+    if _re.search(r"\b(der|die|das|und|ist|ein|eine|mit|auf)\b", lower):
+        return "de"
+    if _re.search(r"\b(bir|ve|bu|ile|için|olan|gibi)\b", lower):
+        return "tr"
+
+    return "en"
 
 
 @app.post("/api/voice/tts")
 async def voice_tts(
     text: str = Form(...),
-    language: str = Form(default="en"),
-    voice: str = Form(default="v2/en_speaker_6"),
+    language: str = Form(default=None),
+    voice: str = Form(default=None),
+    gender: str = Form(default="female"),
 ):
-    """Proxy TTS request to the existing Voice Gateway TTS engine."""
-    url = f"{settings.tts_engine_url.rstrip('/')}{settings.tts_engine_path}"
-    logger.info("TTS proxy → %s  lang=%s voice=%s", url, language, voice)
+    """Generate natural speech using Microsoft Edge Neural TTS."""
+    import edge_tts
+    import io
+
+    lang = language or _detect_tts_lang(text)
+
+    if voice and voice in EDGE_TTS_VOICES.values():
+        selected_voice = voice
+    elif gender == "male" and f"{lang}-male" in EDGE_TTS_VOICES:
+        selected_voice = EDGE_TTS_VOICES[f"{lang}-male"]
+    elif lang in EDGE_TTS_VOICES:
+        selected_voice = EDGE_TTS_VOICES[lang]
+    else:
+        selected_voice = EDGE_TTS_VOICES["en"]
+
+    logger.info("Edge TTS → voice=%s lang=%s text=%d chars", selected_voice, lang, len(text))
 
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                url,
-                json={"text": text, "language": language, "voice": voice},
-                timeout=settings.engine_timeout,
-            )
-            resp.raise_for_status()
-            content_type = resp.headers.get("content-type", "audio/wav")
-            return Response(content=resp.content, media_type=content_type)
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(
-            status_code=exc.response.status_code,
-            detail=f"TTS engine error: {exc.response.text[:500]}",
+        communicate = edge_tts.Communicate(text, selected_voice)
+        audio_data = io.BytesIO()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_data.write(chunk["data"])
+
+        audio_data.seek(0)
+        return Response(
+            content=audio_data.read(),
+            media_type="audio/mpeg",
+            headers={
+                "X-TTS-Voice": selected_voice,
+                "X-TTS-Language": lang,
+            },
         )
     except Exception as exc:
+        logger.error("Edge TTS error: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"TTS engine unreachable: {exc}",
+            detail=f"Edge TTS error: {exc}",
         )
 
 
