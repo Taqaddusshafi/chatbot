@@ -103,11 +103,13 @@ def build_translate_prompt(target_name: str) -> str:
     """Generic system prompt to translate into any target language."""
     extra = " Use Modern Standard Arabic (MSA)." if target_name == "Arabic" else ""
     return (
-        f"You are a professional translator. Translate the user's text into {target_name}. "
-        "Provide only the translation — no explanations, notes, or transliteration. "
-        "Do not add a preamble or wrap the result in quotation marks. "
-        "If the text is already in the target language, return it unchanged. "
-        "Preserve the original meaning, tone, and formatting." + extra
+        f"You are an expert professional translator. Translate the user's text into {target_name} "
+        "accurately and faithfully. Render the COMPLETE meaning naturally and fluently, the way a "
+        f"native {target_name} speaker would actually say it. "
+        "Do not omit anything, do not add anything, and do not loosely paraphrase or change the meaning. "
+        f"Always output the result in {target_name}, even if the input is in another language. "
+        "Output only the translation — no explanations, notes, transliteration, preamble, or "
+        "surrounding quotation marks." + extra
     )
 
 
@@ -408,7 +410,9 @@ async def translate(request: TranslateRequest):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": request.text},
         ],
-        "temperature": 0.2,
+        # Greedy decoding for faithful, deterministic translation (no creative drift).
+        "temperature": 0.0,
+        "top_p": 1.0,
         "max_tokens": 2048,
         "stream": False,
     }
