@@ -75,6 +75,7 @@
           </div>
         </div>
         <div class="chat-header__actions">
+          <button class="btn-icon btn-live" id="btnInterpreter" onclick="openInterpreter()" title="Two-language conversation interpreter">🗣️ Interpret</button>
           <button class="btn-icon btn-live" id="btnLive" onclick="openLiveVoice()" title="Live voice conversation">🎤 Live</button>
           <button class="btn-icon" id="btnClearChat" onclick="clearCurrentChat()" title="Clear chat">🗑️</button>
           <button class="btn-icon" id="btnSettings" onclick="toggleSettings()" title="Settings">⚙️</button>
@@ -216,6 +217,36 @@
       <div class="live-transcript" id="liveTranscript"></div>
 
       <button class="live-stop" id="liveStop" onclick="closeLiveVoice()">End Conversation</button>
+    </div>
+  </div>
+
+  <!-- ═══ Conversation Interpreter ═══ -->
+  <div class="live-overlay" id="interpOverlay">
+    <div class="live-panel interp-panel">
+      <button class="live-close" onclick="closeInterpreter()" title="End">✕</button>
+      <div class="interp-title">🗣️ Conversation Interpreter</div>
+
+      <div class="interp-langs">
+        <select id="interpLangA" onchange="interpSyncLangs()"></select>
+        <button class="interp-swap" onclick="interpSwap()" title="Swap languages">⇄</button>
+        <select id="interpLangB" onchange="interpSyncLangs()"></select>
+      </div>
+
+      <div class="live-orb" id="interpOrb" onclick="interpOrbTap()">
+        <div class="live-orb__ring"></div>
+        <div class="live-orb__ring live-orb__ring--2"></div>
+        <div class="live-orb__core" id="interpOrbCore">🎤</div>
+      </div>
+
+      <div class="live-status" id="interpStatus">Pick two languages, then tap who speaks first</div>
+      <div class="interp-log" id="interpLog"></div>
+
+      <div class="interp-controls">
+        <button class="interp-speak" id="interpBtnA" onclick="interpSpeak('A')">🎙️ Speaker A</button>
+        <button class="interp-speak" id="interpBtnB" onclick="interpSpeak('B')">🎙️ Speaker B</button>
+      </div>
+
+      <button class="live-stop" onclick="closeInterpreter()">End Conversation</button>
     </div>
   </div>
 

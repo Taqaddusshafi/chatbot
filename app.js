@@ -1431,3 +1431,350 @@ function liveCleanForSpeech(text) {
 }
 
 
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  Conversation Interpreter — two-language, two-person live translation
+//  Speaker A talks in language A → transcribe → translate to language B →
+//  speak aloud in B. Then Speaker B talks in B → translate to A → speak in A.
+//  Turns alternate automatically; tap a speaker button to override whose turn.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// code → display label + BCP-47 locale for SpeechRecognition.
+// (Languages without reliable browser STT can still be a translation *target*.)
+const INTERP_LANGS = [
+  { code: 'en', label: 'English', locale: 'en-US' },
+  { code: 'hi', label: 'Hindi — हिन्दी', locale: 'hi-IN' },
+  { code: 'bn', label: 'Bengali — বাংলা', locale: 'bn-IN' },
+  { code: 'ta', label: 'Tamil — தமிழ்', locale: 'ta-IN' },
+  { code: 'te', label: 'Telugu — తెలుగు', locale: 'te-IN' },
+  { code: 'mr', label: 'Marathi — मराठी', locale: 'mr-IN' },
+  { code: 'gu', label: 'Gujarati — ગુજરાતી', locale: 'gu-IN' },
+  { code: 'kn', label: 'Kannada — ಕನ್ನಡ', locale: 'kn-IN' },
+  { code: 'ml', label: 'Malayalam — മലയാളം', locale: 'ml-IN' },
+  { code: 'pa', label: 'Punjabi — ਪੰਜਾਬੀ', locale: 'pa-IN' },
+  { code: 'ur', label: 'Urdu — اردو', locale: 'ur-PK' },
+  { code: 'ne', label: 'Nepali — नेपाली', locale: 'ne-NP' },
+  { code: 'si', label: 'Sinhala — සිංහල', locale: 'si-LK' },
+  { code: 'ar', label: 'Arabic — العربية', locale: 'ar-SA' },
+  { code: 'fa', label: 'Persian — فارسی', locale: 'fa-IR' },
+  { code: 'es', label: 'Spanish — Español', locale: 'es-ES' },
+  { code: 'fr', label: 'French — Français', locale: 'fr-FR' },
+  { code: 'de', label: 'German — Deutsch', locale: 'de-DE' },
+  { code: 'it', label: 'Italian — Italiano', locale: 'it-IT' },
+  { code: 'pt', label: 'Portuguese — Português', locale: 'pt-BR' },
+  { code: 'ru', label: 'Russian — Русский', locale: 'ru-RU' },
+  { code: 'tr', label: 'Turkish — Türkçe', locale: 'tr-TR' },
+  { code: 'zh', label: 'Chinese — 中文', locale: 'zh-CN' },
+  { code: 'ja', label: 'Japanese — 日本語', locale: 'ja-JP' },
+  { code: 'ko', label: 'Korean — 한국어', locale: 'ko-KR' },
+  { code: 'id', label: 'Indonesian', locale: 'id-ID' },
+  { code: 'vi', label: 'Vietnamese — Tiếng Việt', locale: 'vi-VN' },
+  { code: 'th', label: 'Thai — ไทย', locale: 'th-TH' },
+  { code: 'pl', label: 'Polish — Polski', locale: 'pl-PL' },
+  { code: 'nl', label: 'Dutch — Nederlands', locale: 'nl-NL' },
+  { code: 'uk', label: 'Ukrainian — Українська', locale: 'uk-UA' },
+];
+
+const INTERP = {
+  active: false,
+  state: 'idle',     // idle | listening | translating | speaking
+  recog: null,
+  audio: null,
+  current: 'A',      // whose turn it is to speak
+  langA: 'en',
+  langB: 'hi',
+  paused: false,
+  fatal: false,
+};
+
+function interpLang(code) {
+  return INTERP_LANGS.find(l => l.code === code) || INTERP_LANGS[0];
+}
+
+function openInterpreter() {
+  const overlay = document.getElementById('interpOverlay');
+
+  // Populate both selects once.
+  const a = document.getElementById('interpLangA');
+  const b = document.getElementById('interpLangB');
+  if (!a.options.length) {
+    const opts = INTERP_LANGS.map(l => `<option value="${l.code}">${l.label}</option>`).join('');
+    a.innerHTML = opts;
+    b.innerHTML = opts;
+    a.value = 'en';
+    b.value = 'hi';
+  }
+  interpSyncLangs();
+
+  if (window.speechSynthesis) window.speechSynthesis.getVoices();
+
+  INTERP.active = true;
+  INTERP.paused = false;
+  INTERP.fatal = false;
+  overlay.classList.add('open');
+  interpSetState('idle');
+
+  if (!liveSupported()) {
+    interpSetStatus('Live speech needs Chrome, Edge, or Safari (Web Speech API).');
+  } else {
+    interpSetStatus('Tap “Speaker A” or “Speaker B” to begin');
+  }
+  interpUpdateButtons();
+}
+
+function closeInterpreter() {
+  INTERP.active = false;
+  interpStopRecognition();
+  interpStopAudio();
+  interpSetState('idle');
+  document.getElementById('interpOverlay').classList.remove('open');
+}
+
+function interpSyncLangs() {
+  INTERP.langA = document.getElementById('interpLangA').value;
+  INTERP.langB = document.getElementById('interpLangB').value;
+  interpUpdateButtons();
+}
+
+function interpSwap() {
+  const a = document.getElementById('interpLangA');
+  const b = document.getElementById('interpLangB');
+  const tmp = a.value; a.value = b.value; b.value = tmp;
+  interpSyncLangs();
+}
+
+function interpUpdateButtons() {
+  const btnA = document.getElementById('interpBtnA');
+  const btnB = document.getElementById('interpBtnB');
+  if (btnA) btnA.textContent = '🎙️ ' + interpLang(INTERP.langA).label.split(' —')[0];
+  if (btnB) btnB.textContent = '🎙️ ' + interpLang(INTERP.langB).label.split(' —')[0];
+}
+
+// Manually start a given speaker's turn.
+function interpSpeak(which) {
+  if (!INTERP.active || INTERP.fatal) return;
+  INTERP.current = which;
+  INTERP.paused = false;
+  interpStartListening();
+}
+
+function interpOrbTap() {
+  if (!INTERP.active) return;
+  if (INTERP.state === 'speaking') {
+    interpStopAudio();
+    interpStartListening();
+  } else if (INTERP.state === 'listening') {
+    INTERP.paused = true;
+    interpStopRecognition();
+    interpSetState('idle');
+    interpSetStatus('Paused — tap a speaker to continue');
+  } else {
+    interpStartListening();
+  }
+}
+
+function interpSetState(s) {
+  INTERP.state = s;
+  const orb = document.getElementById('interpOrb');
+  if (orb) orb.className = 'live-orb live-orb--' + (s === 'translating' ? 'thinking' : s);
+  const core = document.getElementById('interpOrbCore');
+  if (core) {
+    core.textContent =
+      s === 'listening' ? '🎙️' : s === 'translating' ? '🔁' : s === 'speaking' ? '🔊' : '🎤';
+  }
+}
+
+function interpSetStatus(text) {
+  const el = document.getElementById('interpStatus');
+  if (el) el.textContent = text;
+}
+
+function interpLog(speakerCode, original, targetCode, translation) {
+  const el = document.getElementById('interpLog');
+  if (!el) return;
+  const row = document.createElement('div');
+  row.className = 'interp-log__row';
+  row.innerHTML =
+    `<div class="interp-log__src"><span class="lang-badge">${speakerCode.toUpperCase()}</span> ${escapeHtml(original)}</div>` +
+    `<div class="interp-log__dst"><span class="lang-badge">${targetCode.toUpperCase()}</span> ${escapeHtml(translation)}</div>`;
+  el.appendChild(row);
+  el.scrollTop = el.scrollHeight;
+}
+
+function interpStartListening() {
+  if (!INTERP.active || INTERP.fatal || !liveSupported()) return;
+  INTERP.paused = false;
+  interpStopAudio();
+  interpStopRecognition();
+
+  const speakerCode = INTERP.current === 'A' ? INTERP.langA : INTERP.langB;
+  const loc = interpLang(speakerCode).locale;
+
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const recog = new Recognition();
+  INTERP.recog = recog;
+  recog.lang = loc;
+  recog.interimResults = true;
+  recog.continuous = false;
+  recog.maxAlternatives = 1;
+
+  let finalText = '';
+
+  recog.onstart = () => {
+    interpSetState('listening');
+    interpSetStatus(`Listening — ${interpLang(speakerCode).label.split(' —')[0]} (Speaker ${INTERP.current})`);
+  };
+  recog.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) finalText += r[0].transcript;
+      else interim += r[0].transcript;
+    }
+    interpSetStatus((finalText + ' ' + interim).trim() || 'Listening…');
+  };
+  recog.onerror = (e) => {
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+      INTERP.fatal = true;
+      interpSetState('idle');
+      interpSetStatus('Microphone blocked. Allow mic access, then reopen.');
+    } else if (e.error === 'language-not-supported') {
+      interpSetState('idle');
+      interpSetStatus(`Your browser can’t listen in ${interpLang(speakerCode).label.split(' —')[0]}. Try another language.`);
+      INTERP.paused = true;
+    } else if (e.error !== 'no-speech' && e.error !== 'aborted') {
+      interpSetStatus('Mic error: ' + e.error);
+    }
+  };
+  recog.onend = () => {
+    if (INTERP.recog !== recog) return;
+    INTERP.recog = null;
+    if (!INTERP.active || INTERP.fatal || INTERP.paused) return;
+    const text = finalText.trim();
+    if (text) {
+      interpHandle(text);
+    } else {
+      setTimeout(() => {
+        if (INTERP.active && !INTERP.paused && INTERP.state === 'listening') interpStartListening();
+      }, 300);
+    }
+  };
+
+  try {
+    recog.start();
+  } catch {
+    setTimeout(() => { if (INTERP.active && !INTERP.paused) interpStartListening(); }, 300);
+  }
+}
+
+function interpStopRecognition() {
+  const r = INTERP.recog;
+  INTERP.recog = null;
+  if (r) {
+    r.onstart = r.onresult = r.onerror = r.onend = null;
+    try { r.abort(); } catch {}
+  }
+}
+
+async function interpHandle(text) {
+  interpStopRecognition();
+  interpSetState('translating');
+
+  const speakerCode = INTERP.current === 'A' ? INTERP.langA : INTERP.langB;
+  const targetCode = INTERP.current === 'A' ? INTERP.langB : INTERP.langA;
+  interpSetStatus('Translating…');
+
+  let translation = '';
+  try {
+    translation = await interpTranslate(text, targetCode);
+  } catch (err) {
+    interpSetStatus('Translation error: ' + err.message);
+  }
+
+  if (translation) {
+    interpLog(speakerCode, text, targetCode, translation);
+    interpSetState('speaking');
+    interpSetStatus(`Speaking — ${interpLang(targetCode).label.split(' —')[0]}`);
+    await interpSpeakTTS(translation, targetCode);
+  }
+
+  // Auto-alternate to the other speaker and keep the conversation flowing.
+  if (INTERP.active && !INTERP.paused) {
+    INTERP.current = INTERP.current === 'A' ? 'B' : 'A';
+    interpStartListening();
+  }
+}
+
+async function interpTranslate(text, targetCode) {
+  const resp = await fetch(apiUrl('/translate'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, target_lang: targetCode }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || `HTTP ${resp.status}`);
+  }
+  const data = await resp.json();
+  return (data.translation || '').trim();
+}
+
+async function interpSpeakTTS(text, langCode) {
+  const clean = liveCleanForSpeech(text);
+  if (!clean) return;
+  try {
+    const fd = new FormData();
+    fd.append('text', clean);
+    fd.append('language', langCode);
+    const resp = await fetch(apiUrl('/voice/tts'), { method: 'POST', body: fd });
+    if (!resp.ok) throw new Error(`TTS ${resp.status}`);
+    const blob = await resp.blob();
+    if (blob.size === 0) throw new Error('empty audio');
+    await interpPlayBlob(blob);
+  } catch (err) {
+    console.warn('Interpreter TTS fell back to browser speech:', err.message);
+    await interpBrowserSpeak(clean, langCode);
+  }
+}
+
+function interpPlayBlob(blob) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    INTERP.audio = audio;
+    const done = () => {
+      URL.revokeObjectURL(url);
+      if (INTERP.audio === audio) INTERP.audio = null;
+      resolve();
+    };
+    audio.onended = done;
+    audio.onerror = done;
+    audio.play().catch(done);
+  });
+}
+
+function interpBrowserSpeak(text, langCode) {
+  return new Promise((resolve) => {
+    const synth = window.speechSynthesis;
+    if (!synth) { resolve(); return; }
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = interpLang(langCode).locale;
+    u.rate = 1.0;
+    const voice = synth.getVoices().find(v => v.lang && v.lang.toLowerCase().startsWith(langCode));
+    if (voice) u.voice = voice;
+    u.onend = resolve;
+    u.onerror = resolve;
+    try { synth.cancel(); } catch {}
+    synth.speak(u);
+  });
+}
+
+function interpStopAudio() {
+  if (INTERP.audio) {
+    try { INTERP.audio.pause(); } catch {}
+    INTERP.audio = null;
+  }
+  if (window.speechSynthesis && window.speechSynthesis.speaking) {
+    try { window.speechSynthesis.cancel(); } catch {}
+  }
+}
