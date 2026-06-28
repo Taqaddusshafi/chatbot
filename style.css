@@ -1161,6 +1161,15 @@ body::before {
     width: 95%;
     max-height: 85vh;
   }
+
+  .btn-live__text {
+    display: none;
+  }
+
+  .btn-live {
+    width: 36px;
+    padding: 0;
+  }
 }
 
 /* ── Mobile overlay ────────────────────────────────────────────────────────── */
@@ -1335,7 +1344,17 @@ body::before {
 }
 .live-stop:hover { filter: brightness(1.1); }
 
-.btn-live { font-weight: 600; }
+.btn-live {
+  font-weight: 600;
+  width: auto;
+  min-width: 36px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+}
 
 /* ── Translate target-language bar ─────────────────────────────────────────── */
 .translate-bar {
