@@ -75,6 +75,7 @@
           </div>
         </div>
         <div class="chat-header__actions">
+          <button class="btn-icon btn-live" id="btnLive" onclick="openLiveVoice()" title="Live voice conversation">🎤 Live</button>
           <button class="btn-icon" id="btnClearChat" onclick="clearCurrentChat()" title="Clear chat">🗑️</button>
           <button class="btn-icon" id="btnSettings" onclick="toggleSettings()" title="Settings">⚙️</button>
         </div>
@@ -132,6 +133,35 @@
       <input type="number" id="settingMaxTokens" min="64" max="8192" step="64" />
 
       <button class="btn-save" onclick="saveSettings()">Save Settings</button>
+    </div>
+  </div>
+
+  <!-- ═══ Live Voice Agent ═══ -->
+  <div class="live-overlay" id="liveOverlay">
+    <div class="live-panel">
+      <button class="live-close" id="liveClose" onclick="closeLiveVoice()" title="End conversation">✕</button>
+
+      <div class="live-lang">
+        <label for="liveLang">Language</label>
+        <select id="liveLang" onchange="liveSetLang(this.value)">
+          <option value="en-US">English</option>
+          <option value="ar-SA">العربية (Arabic)</option>
+          <option value="hi-IN">हिन्दी (Hindi)</option>
+          <option value="fr-FR">Français</option>
+          <option value="es-ES">Español</option>
+        </select>
+      </div>
+
+      <div class="live-orb" id="liveOrb" onclick="liveOrbTap()">
+        <div class="live-orb__ring"></div>
+        <div class="live-orb__ring live-orb__ring--2"></div>
+        <div class="live-orb__core" id="liveOrbCore">🎤</div>
+      </div>
+
+      <div class="live-status" id="liveStatus">Tap the orb to start talking</div>
+      <div class="live-transcript" id="liveTranscript"></div>
+
+      <button class="live-stop" id="liveStop" onclick="closeLiveVoice()">End Conversation</button>
     </div>
   </div>
 

@@ -1110,4 +1110,318 @@ function resetSpeakButton() {
   }
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  Live Voice Agent — hands-free conversation
+//  Listen (browser SpeechRecognition) → think (/api/chat) → speak (Edge/Bing TTS
+//  with browser-speech fallback) → listen again. Built to degrade gracefully so
+//  it never gets stuck silent.
+// ══════════════════════════════════════════════════════════════════════════════
+const LIVE = {
+  active: false,
+  state: 'idle',        // idle | listening | thinking | speaking
+  recog: null,
+  audio: null,
+  lang: 'en-US',
+  fatal: false,         // mic permanently blocked
+  paused: false,        // user paused via orb tap
+};
+
+// SpeechRecognition locale → Edge TTS language code (backend auto-detects too).
+const LIVE_TTS_LANG = {
+  'en-US': 'en', 'ar-SA': 'ar', 'hi-IN': 'hi', 'fr-FR': 'fr', 'es-ES': 'es',
+};
+
+function liveSupported() {
+  return 'webkitSpeechRecognition' in window || 'SpeechRecognition' in window;
+}
+
+function openLiveVoice() {
+  const overlay = document.getElementById('liveOverlay');
+  overlay.classList.add('open');
+  LIVE.active = true;
+  LIVE.fatal = false;
+  LIVE.paused = false;
+
+  // Warm up the synthesis voice list for the fallback path.
+  if (window.speechSynthesis) window.speechSynthesis.getVoices();
+
+  if (!liveSupported()) {
+    liveSetState('idle');
+    liveSetStatus('Live voice needs Chrome, Edge, or Safari (Web Speech API).');
+    return;
+  }
+  if (!activeConversationId) newConversation();
+  liveSetState('idle');
+  liveSetStatus('Starting…');
+  liveSetTranscript('');
+  liveStartListening();
+}
+
+function closeLiveVoice() {
+  LIVE.active = false;
+  liveStopRecognition();
+  liveStopAudio();
+  liveSetState('idle');
+  document.getElementById('liveOverlay').classList.remove('open');
+}
+
+function liveSetLang(value) {
+  LIVE.lang = value;
+  if (LIVE.recog) LIVE.recog.lang = value;
+}
+
+// Orb tap = context-aware control: interrupt speech, pause listening, or resume.
+function liveOrbTap() {
+  if (!LIVE.active) return;
+  if (LIVE.state === 'speaking') {
+    liveStopAudio();                 // barge-in
+    liveStartListening();
+  } else if (LIVE.state === 'listening') {
+    LIVE.paused = true;
+    liveStopRecognition();
+    liveSetState('idle');
+    liveSetStatus('Paused — tap the orb to talk');
+  } else {
+    LIVE.paused = false;
+    liveStartListening();
+  }
+}
+
+function liveSetState(s) {
+  LIVE.state = s;
+  const orb = document.getElementById('liveOrb');
+  if (orb) orb.className = 'live-orb live-orb--' + s;
+  const core = document.getElementById('liveOrbCore');
+  if (core) {
+    core.textContent =
+      s === 'listening' ? '🎙️' : s === 'thinking' ? '💭' : s === 'speaking' ? '🔊' : '🎤';
+  }
+}
+
+function liveSetStatus(text) {
+  const el = document.getElementById('liveStatus');
+  if (el) el.textContent = text;
+}
+
+function liveSetTranscript(text) {
+  const el = document.getElementById('liveTranscript');
+  if (el) el.textContent = text || '';
+}
+
+function liveStartListening() {
+  if (!LIVE.active || LIVE.fatal || !liveSupported()) return;
+  LIVE.paused = false;
+  liveStopAudio();
+  liveStopRecognition();
+
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const recog = new Recognition();
+  LIVE.recog = recog;
+  recog.lang = LIVE.lang;
+  recog.interimResults = true;
+  recog.continuous = false;
+  recog.maxAlternatives = 1;
+
+  let finalText = '';
+
+  recog.onstart = () => {
+    liveSetState('listening');
+    liveSetStatus('Listening… speak now');
+    liveSetTranscript('');
+  };
+
+  recog.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) finalText += r[0].transcript;
+      else interim += r[0].transcript;
+    }
+    liveSetTranscript((finalText + ' ' + interim).trim());
+  };
+
+  recog.onerror = (e) => {
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+      LIVE.fatal = true;
+      liveSetState('idle');
+      liveSetStatus('Microphone blocked. Allow mic access, then reopen Live.');
+    } else if (e.error !== 'no-speech' && e.error !== 'aborted') {
+      liveSetStatus('Mic error: ' + e.error);
+    }
+    // 'no-speech' / 'aborted' fall through to onend, which decides what to do.
+  };
+
+  recog.onend = () => {
+    if (LIVE.recog !== recog) return;       // a newer session took over
+    LIVE.recog = null;
+    if (!LIVE.active || LIVE.fatal || LIVE.paused) return;
+    const text = finalText.trim();
+    if (text) {
+      liveHandleUtterance(text);
+    } else {
+      // Heard nothing — keep listening (small delay avoids rapid-restart errors).
+      setTimeout(() => {
+        if (LIVE.active && !LIVE.paused && LIVE.state !== 'thinking' && LIVE.state !== 'speaking') {
+          liveStartListening();
+        }
+      }, 300);
+    }
+  };
+
+  try {
+    recog.start();
+  } catch {
+    // start() throws if called too soon after a previous session; retry shortly.
+    setTimeout(() => { if (LIVE.active && !LIVE.paused) liveStartListening(); }, 300);
+  }
+}
+
+function liveStopRecognition() {
+  const r = LIVE.recog;
+  LIVE.recog = null;
+  if (r) {
+    r.onstart = r.onresult = r.onerror = r.onend = null;
+    try { r.abort(); } catch {}
+  }
+}
+
+async function liveHandleUtterance(text) {
+  liveStopRecognition();
+  liveSetState('thinking');
+  liveSetStatus('Thinking…');
+  liveSetTranscript(text);
+
+  if (!activeConversationId) newConversation();
+  const conv = conversations[activeConversationId];
+  if (conv.messages.length === 0) {
+    conv.title = text.slice(0, 50) + (text.length > 50 ? '…' : '');
+    renderConversationList();
+  }
+  conv.messages.push({ role: 'user', content: text });
+  saveConversations();
+  renderMessages();
+
+  let reply = '';
+  try {
+    reply = await liveGetReply(conv);
+  } catch (err) {
+    liveSetStatus('Connection error: ' + err.message);
+  }
+
+  if (reply) {
+    conv.messages.push({ role: 'assistant', content: reply });
+    saveConversations();
+    renderMessages();
+    liveSetTranscript(reply);
+    await liveSpeak(reply);
+  }
+
+  if (LIVE.active && !LIVE.paused) liveStartListening();
+}
+
+async function liveGetReply(conv) {
+  const messages = conv.messages
+    .filter(m => m.meta?.type !== 'translation')
+    .filter(m => !(m.role === 'assistant' && m.content.startsWith('⚠️')))
+    .map(m => ({ role: m.role, content: m.content }));
+
+  const resp = await fetch(apiUrl('/chat'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      messages,
+      temperature: config.temperature,
+      max_tokens: config.maxTokens,
+      stream: false,
+    }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || `HTTP ${resp.status}`);
+  }
+  const data = await resp.json();
+  return (data.choices?.[0]?.message?.content || '').trim();
+}
+
+async function liveSpeak(text) {
+  liveSetState('speaking');
+  liveSetStatus('Speaking…');
+
+  const clean = liveCleanForSpeech(text);
+  if (!clean) return;
+  const langCode = LIVE_TTS_LANG[LIVE.lang] || 'en';
+
+  // Primary: Edge/Bing neural TTS from the backend. Fallback: browser speech.
+  try {
+    const fd = new FormData();
+    fd.append('text', clean);
+    fd.append('language', langCode);
+    const resp = await fetch(apiUrl('/voice/tts'), { method: 'POST', body: fd });
+    if (!resp.ok) throw new Error(`TTS ${resp.status}`);
+    const blob = await resp.blob();
+    if (blob.size === 0) throw new Error('empty audio');
+    await livePlayBlob(blob);
+  } catch (err) {
+    console.warn('Live TTS fell back to browser speech:', err.message);
+    await liveBrowserSpeak(clean, langCode);
+  }
+}
+
+function livePlayBlob(blob) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    LIVE.audio = audio;
+    const done = () => {
+      URL.revokeObjectURL(url);
+      if (LIVE.audio === audio) LIVE.audio = null;
+      resolve();
+    };
+    audio.onended = done;
+    audio.onerror = done;
+    audio.play().catch(done);
+  });
+}
+
+function liveBrowserSpeak(text, langCode) {
+  return new Promise((resolve) => {
+    const synth = window.speechSynthesis;
+    if (!synth) { resolve(); return; }
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = LIVE.lang || 'en-US';
+    u.rate = 1.0;
+    const voice = synth.getVoices().find(v => v.lang && v.lang.toLowerCase().startsWith(langCode));
+    if (voice) u.voice = voice;
+    u.onend = resolve;
+    u.onerror = resolve;
+    // Some browsers need a fresh cancel before speaking.
+    try { synth.cancel(); } catch {}
+    synth.speak(u);
+  });
+}
+
+function liveStopAudio() {
+  if (LIVE.audio) {
+    try { LIVE.audio.pause(); } catch {}
+    LIVE.audio = null;
+  }
+  if (window.speechSynthesis && window.speechSynthesis.speaking) {
+    try { window.speechSynthesis.cancel(); } catch {}
+  }
+}
+
+// Strip markdown/code/urls so the TTS engine doesn't "pronounce" syntax.
+function liveCleanForSpeech(text) {
+  return text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`]*`/g, ' ')
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/https?:\/\/\S+|www\.\S+/gi, ' ')
+    .replace(/[#*_~>`|]/g, ' ')
+    .replace(/^\s*[-•]\s+/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 1200);
+}
+
 
