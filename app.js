@@ -1417,15 +1417,90 @@ async function liveSpeak(text) {
     fd.append('language', langCode);
     const resp = await fetch(apiUrl('/voice/tts'), { method: 'POST', body: fd });
     if (!resp.ok) throw new Error(`TTS ${resp.status}`);
-    const blob = await resp.blob();
-    if (blob.size === 0) throw new Error('empty audio');
-    await livePlayBlob(blob);
+
+    // Stream playback so the voice starts on the first chunk (~instant) instead
+    // of waiting for the whole clip to download.
+    const canStream = window.MediaSource
+      && typeof MediaSource.isTypeSupported === 'function'
+      && MediaSource.isTypeSupported('audio/mpeg')
+      && resp.body;
+    if (canStream) {
+      await liveStreamPlay(resp);
+    } else {
+      const blob = await resp.blob();
+      if (blob.size === 0) throw new Error('empty audio');
+      await livePlayBlob(blob);
+    }
   } catch (err) {
     console.warn('Live TTS fell back to browser speech:', err.message);
     await liveBrowserSpeak(clean, langCode);
   } finally {
     liveStopBargeMonitor();
   }
+}
+
+// Stream MP3 via MediaSource: playback begins as soon as the first chunk lands.
+function liveStreamPlay(resp) {
+  return new Promise((resolve, reject) => {
+    const mediaSource = new MediaSource();
+    const audio = new Audio();
+    audio.src = URL.createObjectURL(mediaSource);
+    LIVE.audio = audio;
+
+    let settled = false;
+    let gotAudio = false;
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      if (LIVE.audio === audio) LIVE.audio = null;
+      if (LIVE.audioResolve === finish) LIVE.audioResolve = null;
+      try { URL.revokeObjectURL(audio.src); } catch {}
+      if (err && !gotAudio) reject(err);   // nothing played → let caller fall back
+      else resolve();
+    };
+    LIVE.audioResolve = finish;            // barge-in/stop resolves cleanly
+
+    audio.onended = () => finish();
+    audio.onerror = () => finish(gotAudio ? null : new Error('audio error'));
+
+    mediaSource.addEventListener('sourceopen', async () => {
+      let sb;
+      try { sb = mediaSource.addSourceBuffer('audio/mpeg'); }
+      catch (e) { finish(e); return; }
+
+      const reader = resp.body.getReader();
+      const queue = [];
+      let streamDone = false;
+      let started = false;
+
+      const pump = () => {
+        if (sb.updating || queue.length === 0) {
+          if (streamDone && queue.length === 0 && !sb.updating) {
+            try { if (mediaSource.readyState === 'open') mediaSource.endOfStream(); } catch {}
+          }
+          return;
+        }
+        try { sb.appendBuffer(queue.shift()); } catch {}
+      };
+
+      sb.addEventListener('updateend', () => {
+        if (!started && audio.paused) { audio.play().catch(() => {}); started = true; }
+        pump();
+      });
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) { streamDone = true; pump(); break; }
+          gotAudio = true;
+          queue.push(value);
+          pump();
+        }
+      } catch { streamDone = true; }
+
+      if (!gotAudio) finish(new Error('no audio'));   // empty → fall back to browser
+    });
+  });
 }
 
 // While the agent is speaking, run a lightweight recognizer that interrupts

@@ -644,41 +644,31 @@ async def voice_tts(
     else:
         selected_voice = EDGE_TTS_VOICES["en"]  # fallback
 
-    async def synthesize() -> bytes:
-        """Collect the full MP3 from Edge TTS, retrying transient failures."""
-        last_exc = None
+    async def audio_stream():
+        """Stream MP3 chunks as Edge TTS produces them, for instant playback start.
+
+        Reliability is preserved by retrying the connection *before* the first
+        audio chunk is emitted (the common transient-failure point on serverless).
+        Once audio has started flowing, we stream it straight through.
+        """
         for _ in range(3):
-            buf = bytearray()
+            produced = False
             try:
                 communicate = edge_tts.Communicate(text, selected_voice)
                 async for chunk in communicate.stream():
-                    if chunk["type"] == "audio":
-                        buf.extend(chunk["data"])
-                if buf:
-                    return bytes(buf)
-            except Exception as exc:  # transient WSS/network error — retry
-                last_exc = exc
-        if last_exc:
-            raise last_exc
-        return b""
+                    if chunk["type"] == "audio" and chunk["data"]:
+                        produced = True
+                        yield chunk["data"]
+                if produced:
+                    return
+            except Exception:
+                if produced:
+                    return  # already streaming — can't restart mid-response
+                # else fall through and retry the connection
+        # all attempts failed before any audio → client falls back gracefully
 
-    try:
-        audio = await synthesize()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"TTS engine error: {exc}",
-        )
-
-    if not audio:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="TTS engine returned no audio.",
-        )
-
-    # Return the complete clip so the client always gets full neural audio.
-    return Response(
-        content=audio,
+    return StreamingResponse(
+        audio_stream(),
         media_type="audio/mpeg",
         headers={
             "X-TTS-Voice": selected_voice,
