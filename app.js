@@ -196,10 +196,20 @@ function setMode(mode, updateConv = true) {
     if (translateBar) translateBar.classList.remove('visible');
   }
 
-  if (updateConv && activeConversationId && conversations[activeConversationId]) {
-    conversations[activeConversationId].mode = mode;
-    saveConversations();
-    renderConversationList();
+  if (updateConv) {
+    const conv = activeConversationId ? conversations[activeConversationId] : null;
+    if (conv && conv.messages.length > 0 && (conv.mode || 'chat') !== mode) {
+      // Keep chat and translation in separate threads: switching modes on a
+      // conversation that already has messages of the other mode starts a fresh
+      // conversation instead of mixing them.
+      newConversation();
+    } else if (conv) {
+      // Empty conversation just adopts the new mode (no need to spawn a new one).
+      conv.mode = mode;
+      saveConversations();
+      renderConversationList();
+    }
+    // No active conversation yet → one is created with this mode on first message.
   }
 }
 

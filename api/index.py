@@ -105,8 +105,26 @@ def build_translate_prompt(target_name: str) -> str:
     return (
         f"You are a professional translator. Translate the user's text into {target_name}. "
         "Provide only the translation — no explanations, notes, or transliteration. "
+        "Do not add a preamble or wrap the result in quotation marks. "
+        "If the text is already in the target language, return it unchanged. "
         "Preserve the original meaning, tone, and formatting." + extra
     )
+
+
+# Strip a leading "Here is the translation:" / "Translation:" preamble that some
+# models add despite instructions — keeps the displayed translation clean.
+_TRANSLATE_PREAMBLE_RE = re.compile(
+    r"^\s*(sure[,!.]?\s*)?(here(?:'s| is| are)[^:\n]*:|translation\s*:)\s*",
+    re.IGNORECASE,
+)
+
+
+def clean_translation(text: str) -> str:
+    text = _TRANSLATE_PREAMBLE_RE.sub("", text.strip()).strip()
+    # Unwrap a translation fully enclosed in matching quotes (no inner quotes).
+    if len(text) >= 2 and text[0] in '"“' and text[-1] in '"”' and '"' not in text[1:-1]:
+        text = text[1:-1].strip()
+    return text
 
 # Frontend HTML
 _PUBLIC = Path(__file__).resolve().parent.parent / "public" / "index.html"
@@ -409,7 +427,9 @@ async def translate(request: TranslateRequest):
             )
             resp.raise_for_status()
             data = resp.json()
-            translation = data["choices"][0]["message"]["content"].strip()
+            translation = clean_translation(
+                data["choices"][0]["message"]["content"]
+            )
             return {
                 "translation": translation,
                 "source_lang": source_lang,
