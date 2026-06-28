@@ -1331,3 +1331,32 @@ body::before {
 .live-stop:hover { filter: brightness(1.1); }
 
 .btn-live { font-weight: 600; }
+
+/* ── Translate target-language bar ─────────────────────────────────────────── */
+.translate-bar {
+  display: none;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0 0.25rem 0.6rem;
+}
+.translate-bar.visible { display: flex; }
+.translate-bar label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.translate-bar select {
+  background: var(--bg-glass);
+  color: var(--text-primary);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border-radius: 10px;
+  padding: 0.4rem 0.7rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  max-width: 220px;
+}
+.translate-bar select:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}

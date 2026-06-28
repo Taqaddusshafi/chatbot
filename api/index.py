@@ -47,18 +47,36 @@ CHAT_SYSTEM_PROMPT = os.environ.get(
     "Do not switch languages or translate unless the user explicitly asks you to.",
 )
 
-TRANSLATE_EN_TO_AR = (
-    "You are a professional Arabic-English translator. "
-    "Translate the following text from English to Arabic. "
-    "Provide only the translation, no explanations or notes. "
-    "Use Modern Standard Arabic (MSA)."
-)
+# Supported translation targets (code → full language name for the prompt).
+LANGUAGE_NAMES = {
+    "en": "English",
+    "ar": "Arabic",
+    "hi": "Hindi",
+    "ur": "Urdu",
+    "bn": "Bengali",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "fr": "French",
+    "es": "Spanish",
+    "de": "German",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "tr": "Turkish",
+    "zh": "Chinese",
+    "ja": "Japanese",
+    "ko": "Korean",
+}
 
-TRANSLATE_AR_TO_EN = (
-    "You are a professional Arabic-English translator. "
-    "Translate the following text from Arabic to English. "
-    "Provide only the translation, no explanations or notes."
-)
+
+def build_translate_prompt(target_name: str) -> str:
+    """Generic system prompt to translate into any target language."""
+    extra = " Use Modern Standard Arabic (MSA)." if target_name == "Arabic" else ""
+    return (
+        f"You are a professional translator. Translate the user's text into {target_name}. "
+        "Provide only the translation — no explanations, notes, or transliteration. "
+        "Preserve the original meaning, tone, and formatting." + extra
+    )
 
 # Frontend HTML
 _PUBLIC = Path(__file__).resolve().parent.parent / "public" / "index.html"
@@ -106,7 +124,11 @@ class ChatRequest(BaseModel):
 
 class TranslateRequest(BaseModel):
     text: str = Field(..., min_length=1)
-    target_lang: str | None = Field(default=None, pattern="^(ar|en)$")
+    target_lang: str | None = Field(
+        default=None,
+        description="Target language code (e.g. 'en', 'ar', 'hi', 'fr'). "
+        "Auto-detects an Arabic↔English flip when omitted.",
+    )
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -320,8 +342,17 @@ async def chat(request: ChatRequest):
 @app.post("/api/translate")
 async def translate(request: TranslateRequest):
     source_lang = "ar" if is_arabic(request.text) else "en"
-    target_lang = request.target_lang or ("en" if source_lang == "ar" else "ar")
-    system_prompt = TRANSLATE_EN_TO_AR if target_lang == "ar" else TRANSLATE_AR_TO_EN
+
+    # Use the caller's chosen target language; fall back to the old Arabic↔English
+    # auto-flip when none is provided. Unknown codes default to English.
+    if request.target_lang:
+        target_lang = request.target_lang.lower()
+    else:
+        target_lang = "en" if source_lang == "ar" else "ar"
+    if target_lang not in LANGUAGE_NAMES:
+        target_lang = "en"
+
+    system_prompt = build_translate_prompt(LANGUAGE_NAMES[target_lang])
 
     payload = {
         "model": VLLM_MODEL,

@@ -179,18 +179,21 @@ function setMode(mode, updateConv = true) {
   transBtn.classList.toggle('active', mode === 'translate');
   transBtn.classList.toggle('translate-active', mode === 'translate');
 
+  const translateBar = document.getElementById('translateBar');
   if (mode === 'translate') {
     headerIcon.className = 'chat-header__mode-icon translate-mode';
     headerIcon.textContent = '🌐';
     headerText.textContent = 'Translation Mode';
-    headerHint.textContent = 'Arabic ↔ English';
-    input.placeholder = 'Type text to translate (Arabic or English)...';
+    headerHint.textContent = 'Pick a target language';
+    input.placeholder = 'Type text to translate…';
+    if (translateBar) translateBar.classList.add('visible');
   } else {
     headerIcon.className = 'chat-header__mode-icon chat-mode';
     headerIcon.textContent = '💬';
     headerText.textContent = 'Chat Mode';
     headerHint.textContent = 'General AI conversation';
     input.placeholder = 'Type your message...';
+    if (translateBar) translateBar.classList.remove('visible');
   }
 
   if (updateConv && activeConversationId && conversations[activeConversationId]) {
@@ -348,11 +351,14 @@ async function generateTranslation(text) {
   updateSendButton();
   showTypingIndicator();
 
+  const targetSel = document.getElementById('translateTarget');
+  const targetLang = targetSel ? targetSel.value : undefined;
+
   try {
     const response = await fetch(apiUrl('/translate'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, target_lang: targetLang }),
     });
 
     if (!response.ok) {
