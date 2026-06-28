@@ -1248,12 +1248,17 @@ function liveStartListening() {
   recog.maxAlternatives = 1;
 
   let finalText = '';
+  let speaking = false;
 
-  // End-of-speech detection: only finalize after the user has been silent a
-  // moment, so a brief pause mid-sentence doesn't cut them off.
-  const SILENCE_MS = 1500;
-  const armSilence = () => {
-    if (LIVE.silenceTimer) clearTimeout(LIVE.silenceTimer);
+  // End-of-speech detection driven by the browser's voice-activity events: only
+  // start the silence countdown once the mic reports speech has actually stopped,
+  // so a pause mid-sentence (or sparse interim results) never cuts the user off.
+  const SILENCE_MS = 1600;
+  const cancelStop = () => {
+    if (LIVE.silenceTimer) { clearTimeout(LIVE.silenceTimer); LIVE.silenceTimer = null; }
+  };
+  const scheduleStop = () => {
+    cancelStop();
     LIVE.silenceTimer = setTimeout(() => {
       try { recog.stop(); } catch {}   // graceful stop → onend processes the text
     }, SILENCE_MS);
@@ -1265,6 +1270,12 @@ function liveStartListening() {
     liveSetTranscript('');
   };
 
+  // While the mic detects speech, never schedule a stop.
+  recog.onaudiostart = cancelStop;
+  recog.onsoundstart = cancelStop;
+  recog.onspeechstart = () => { speaking = true; cancelStop(); };
+  recog.onspeechend = () => { speaking = false; scheduleStop(); };
+
   recog.onresult = (e) => {
     let interim = '';
     for (let i = e.resultIndex; i < e.results.length; i++) {
@@ -1273,7 +1284,9 @@ function liveStartListening() {
       else interim += r[0].transcript;
     }
     liveSetTranscript((finalText + ' ' + interim).trim());
-    armSilence();                  // speech detected → (re)start the silence timer
+    // Only count silence when the mic isn't actively hearing speech. This also
+    // serves as a fallback for browsers that don't fire onspeechend.
+    if (!speaking) scheduleStop();
   };
 
   recog.onerror = (e) => {
@@ -1319,6 +1332,7 @@ function liveStopRecognition() {
   LIVE.recog = null;
   if (r) {
     r.onstart = r.onresult = r.onerror = r.onend = null;
+    r.onaudiostart = r.onsoundstart = r.onspeechstart = r.onspeechend = null;
     try { r.abort(); } catch {}
   }
 }
@@ -1684,11 +1698,16 @@ function interpStartListening() {
   recog.maxAlternatives = 1;
 
   let finalText = '';
+  let speaking = false;
 
-  // Wait for the speaker to actually finish before translating their turn.
-  const SILENCE_MS = 1500;
-  const armSilence = () => {
-    if (INTERP.silenceTimer) clearTimeout(INTERP.silenceTimer);
+  // Wait for the speaker to actually finish (browser voice-activity events drive
+  // the endpoint, so mid-sentence pauses never cut the turn short).
+  const SILENCE_MS = 1600;
+  const cancelStop = () => {
+    if (INTERP.silenceTimer) { clearTimeout(INTERP.silenceTimer); INTERP.silenceTimer = null; }
+  };
+  const scheduleStop = () => {
+    cancelStop();
     INTERP.silenceTimer = setTimeout(() => {
       try { recog.stop(); } catch {}
     }, SILENCE_MS);
@@ -1698,6 +1717,10 @@ function interpStartListening() {
     interpSetState('listening');
     interpSetStatus(`Listening — ${interpLang(speakerCode).label.split(' —')[0]} (Speaker ${INTERP.current})`);
   };
+  recog.onaudiostart = cancelStop;
+  recog.onsoundstart = cancelStop;
+  recog.onspeechstart = () => { speaking = true; cancelStop(); };
+  recog.onspeechend = () => { speaking = false; scheduleStop(); };
   recog.onresult = (e) => {
     let interim = '';
     for (let i = e.resultIndex; i < e.results.length; i++) {
@@ -1706,7 +1729,7 @@ function interpStartListening() {
       else interim += r[0].transcript;
     }
     interpSetStatus((finalText + ' ' + interim).trim() || 'Listening…');
-    armSilence();
+    if (!speaking) scheduleStop();
   };
   recog.onerror = (e) => {
     if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
@@ -1749,6 +1772,7 @@ function interpStopRecognition() {
   INTERP.recog = null;
   if (r) {
     r.onstart = r.onresult = r.onerror = r.onend = null;
+    r.onaudiostart = r.onsoundstart = r.onspeechstart = r.onspeechend = null;
     try { r.abort(); } catch {}
   }
 }
