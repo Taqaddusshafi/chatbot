@@ -160,6 +160,10 @@
               <option value="sw">Swahili — Kiswahili</option>
             </optgroup>
           </select>
+          <div class="translate-engine" id="translateEngine" title="Choose how text is translated">
+            <button type="button" class="engine-opt active" id="engineLlmBtn" onclick="setTranslateEngine('llm')">🤖 AI model</button>
+            <button type="button" class="engine-opt" id="engineApiBtn" onclick="setTranslateEngine('api')">⚡ Translation API</button>
+          </div>
         </div>
         <div class="input-container" id="inputContainer">
           <textarea

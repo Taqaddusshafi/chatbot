@@ -12,6 +12,7 @@ const DEFAULT_CONFIG = {
 
 let config = loadConfig();
 let currentMode = 'chat'; // 'chat' | 'translate'
+let translateEngine = localStorage.getItem('chatbot_translateEngine') || 'llm'; // 'llm' | 'api'
 let conversations = loadConversations();
 let activeConversationId = null;
 let isGenerating = false;
@@ -27,6 +28,7 @@ let recordSampleRate = 48000;
 // ── Initialization ────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   applyConfig();
+  applyTranslateEngine();
   renderConversationList();
 
   // Load last active conversation or show welcome
@@ -352,6 +354,20 @@ async function generateChatResponse() {
   }
 }
 
+// ── Translation engine toggle (AI model vs free Translation API) ──────────────
+function setTranslateEngine(engine) {
+  translateEngine = engine === 'api' ? 'api' : 'llm';
+  localStorage.setItem('chatbot_translateEngine', translateEngine);
+  applyTranslateEngine();
+}
+
+function applyTranslateEngine() {
+  const llmBtn = document.getElementById('engineLlmBtn');
+  const apiBtn = document.getElementById('engineApiBtn');
+  if (llmBtn) llmBtn.classList.toggle('active', translateEngine === 'llm');
+  if (apiBtn) apiBtn.classList.toggle('active', translateEngine === 'api');
+}
+
 // ── Translation ───────────────────────────────────────────────────────────────
 async function generateTranslation(text) {
   if (!activeConversationId) return;
@@ -368,7 +384,7 @@ async function generateTranslation(text) {
     const response = await fetch(apiUrl('/translate'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, target_lang: targetLang }),
+      body: JSON.stringify({ text, target_lang: targetLang, engine: translateEngine }),
     });
 
     if (!response.ok) {

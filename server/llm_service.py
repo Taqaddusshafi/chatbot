@@ -134,11 +134,26 @@ async def complete_chat(
 # ---------------------------------------------------------------------------
 # Translation helper
 # ---------------------------------------------------------------------------
+# Language code → human-readable name, used to build translation prompts for
+# languages beyond the built-in Arabic/English pair.
+LANG_NAMES = {
+    "en": "English", "ar": "Arabic", "hi": "Hindi", "bn": "Bengali",
+    "ta": "Tamil", "te": "Telugu", "mr": "Marathi", "gu": "Gujarati",
+    "kn": "Kannada", "ml": "Malayalam", "pa": "Punjabi", "or": "Odia",
+    "as": "Assamese", "ur": "Urdu", "ne": "Nepali", "si": "Sinhala",
+    "sa": "Sanskrit", "kok": "Konkani", "mai": "Maithili", "zh": "Chinese",
+    "es": "Spanish", "fr": "French", "pt": "Portuguese", "ru": "Russian",
+    "de": "German", "ja": "Japanese", "ko": "Korean", "it": "Italian",
+    "tr": "Turkish", "fa": "Persian", "id": "Indonesian", "vi": "Vietnamese",
+    "th": "Thai", "pl": "Polish", "nl": "Dutch", "uk": "Ukrainian",
+}
+
+
 async def translate_text(text: str, target_lang: str | None = None) -> dict:
-    """Translate text between Arabic and English.
+    """Translate text using the LLM.
 
     If target_lang is not specified, auto-detects the source language
-    and translates to the other.
+    and translates between Arabic and English.
 
     Returns:
         dict with keys: translation, source_lang, target_lang
@@ -150,8 +165,16 @@ async def translate_text(text: str, target_lang: str | None = None) -> dict:
 
     if target_lang == "ar":
         system_prompt = settings.translate_en_to_ar_prompt
-    else:
+    elif target_lang == "en" and source_lang == "ar":
         system_prompt = settings.translate_ar_to_en_prompt
+    else:
+        # Generic prompt for any other target language.
+        target_name = LANG_NAMES.get(target_lang, target_lang)
+        system_prompt = (
+            f"You are a professional translator. Translate the following text "
+            f"into {target_name}. Provide only the translation — no explanations, "
+            "notes, transliteration, or the original text."
+        )
 
     messages = [{"role": "user", "content": text}]
     translation = await complete_chat(
@@ -163,6 +186,46 @@ async def translate_text(text: str, target_lang: str | None = None) -> dict:
     return {
         "translation": translation.strip(),
         "source_lang": source_lang,
+        "target_lang": target_lang,
+    }
+
+
+async def translate_via_api(text: str, target_lang: str | None = None) -> dict:
+    """Translate using Google's free (keyless) translation endpoint.
+
+    Higher-coverage, lower-latency alternative to the LLM. Google auto-detects
+    the source language, so this works for any pair in the dropdown.
+
+    Returns:
+        dict with keys: translation, source_lang, target_lang
+    """
+    if target_lang is None:
+        source = detect_language(text)
+        target_lang = "en" if source == "ar" else "ar"
+
+    url = "https://translate.googleapis.com/translate_a/single"
+    params = {
+        "client": "gtx",
+        "sl": "auto",          # auto-detect source language
+        "tl": target_lang,
+        "dt": "t",
+        "q": text,
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            url, params=params, headers={"User-Agent": "Mozilla/5.0"}
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    # Response shape: [[[translated, original, ...], ...], ..., detected_lang, ...]
+    segments = data[0] or []
+    translation = "".join(seg[0] for seg in segments if seg and seg[0])
+    detected = data[2] if len(data) > 2 and data[2] else detect_language(text)
+
+    return {
+        "translation": translation.strip(),
+        "source_lang": detected,
         "target_lang": target_lang,
     }
 

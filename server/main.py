@@ -23,6 +23,7 @@ from llm_service import (
     list_models,
     stream_chat,
     translate_text,
+    translate_via_api,
 )
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
@@ -72,8 +73,13 @@ class TranslateRequest(BaseModel):
     text: str = Field(..., min_length=1)
     target_lang: str | None = Field(
         default=None,
-        pattern="^(ar|en)$",
-        description="Target language: 'ar' or 'en'. Auto-detects if omitted.",
+        max_length=10,
+        description="Target language code (e.g. 'en', 'ar', 'hi'). Auto-detects if omitted.",
+    )
+    engine: str = Field(
+        default="llm",
+        pattern="^(llm|api)$",
+        description="'llm' = AI model translation, 'api' = free Google translation API.",
     )
 
 
@@ -146,12 +152,18 @@ async def chat(request: ChatRequest):
 
 @app.post("/api/translate", response_model=TranslateResponse)
 async def translate(request: TranslateRequest):
-    """Translate text between Arabic and English."""
+    """Translate text via the LLM or the free Google translation API."""
     try:
-        result = await translate_text(
-            text=request.text,
-            target_lang=request.target_lang,
-        )
+        if request.engine == "api":
+            result = await translate_via_api(
+                text=request.text,
+                target_lang=request.target_lang,
+            )
+        else:
+            result = await translate_text(
+                text=request.text,
+                target_lang=request.target_lang,
+            )
         return result
     except httpx.HTTPStatusError as exc:
         raise HTTPException(

@@ -1457,6 +1457,34 @@ body::before {
   border-color: var(--accent-primary);
 }
 
+/* Engine toggle: AI model vs free Translation API */
+.translate-engine {
+  display: inline-flex;
+  margin-left: auto;
+  background-color: var(--bg-tertiary);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 2px;
+  gap: 2px;
+}
+.engine-opt {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.35rem 0.7rem;
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.15s, color 0.15s;
+}
+.engine-opt:hover { color: var(--text-primary); }
+.engine-opt.active {
+  background-color: var(--accent-primary);
+  color: #fff;
+}
+
 /* ── Conversation Interpreter ──────────────────────────────────────────────── */
 .interp-panel { gap: 1.1rem; }
 .interp-title {
