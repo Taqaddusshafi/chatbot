@@ -1168,7 +1168,10 @@ function openLiveVoice() {
     liveSetStatus('Live voice needs Chrome, Edge, or Safari (Web Speech API).');
     return;
   }
-  if (!activeConversationId) newConversation();
+  // Start each live session in a fresh conversation so it begins from the beginning
+  // (reuse the current one only if it's still empty).
+  const conv = activeConversationId ? conversations[activeConversationId] : null;
+  if (!conv || conv.messages.length > 0) newConversation();
   liveSetState('idle');
   liveSetStatus('Starting…');
   liveSetTranscript('');
@@ -1181,6 +1184,7 @@ function closeLiveVoice() {
   liveStopRecognition();
   liveStopAudio();
   liveSetState('idle');
+  liveSetTranscript('');           // clear so the next session starts fresh
   document.getElementById('liveOverlay').classList.remove('open');
 }
 
@@ -1549,6 +1553,9 @@ function openInterpreter() {
   INTERP.active = true;
   INTERP.paused = false;
   INTERP.fatal = false;
+  INTERP.current = 'A';             // fresh session always starts with Speaker A
+  const log = document.getElementById('interpLog');
+  if (log) log.innerHTML = '';      // clear any previous conversation
   overlay.classList.add('open');
   interpSetState('idle');
 
@@ -1566,6 +1573,9 @@ function closeInterpreter() {
   interpStopRecognition();
   interpStopAudio();
   interpSetState('idle');
+  INTERP.current = 'A';
+  const log = document.getElementById('interpLog');
+  if (log) log.innerHTML = '';      // end = wipe the conversation so next start is fresh
   document.getElementById('interpOverlay').classList.remove('open');
 }
 
