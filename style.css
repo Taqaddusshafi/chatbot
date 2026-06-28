@@ -88,6 +88,12 @@ select:-webkit-autofill {
   transition: background-color 5000s ease-in-out 0s;
 }
 
+/* Ensure select elements are dark on all devices, preventing system defaults from showing white */
+select {
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
 /* Ensure select option values are dark styled on all systems */
 select option {
   background-color: var(--bg-secondary);
@@ -1296,9 +1302,9 @@ body::before {
 .live-lang { display: flex; align-items: center; gap: 0.5rem; }
 .live-lang label { font-size: 0.8rem; color: var(--text-muted); }
 .live-lang select {
-  background: var(--bg-glass);
+  background-color: var(--bg-tertiary);
   color: var(--text-primary);
-  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 10px;
   padding: 0.35rem 0.6rem;
   font-size: 0.85rem;
@@ -1437,9 +1443,9 @@ body::before {
   white-space: nowrap;
 }
 .translate-bar select {
-  background: var(--bg-glass);
+  background-color: var(--bg-tertiary);
   color: var(--text-primary);
-  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 10px;
   padding: 0.4rem 0.7rem;
   font-size: 0.85rem;
@@ -1469,9 +1475,9 @@ body::before {
   flex: 1;
   min-width: 0;
   max-width: 165px;
-  background: var(--bg-glass);
+  background-color: var(--bg-tertiary);
   color: var(--text-primary);
-  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 10px;
   padding: 0.4rem 0.6rem;
   font-size: 0.85rem;
