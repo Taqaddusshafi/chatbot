@@ -1143,6 +1143,7 @@ const LIVE = {
   paused: false,        // user paused via orb tap
   gen: 0,               // turn generation — stale async flows bail when it changes
   silenceTimer: null,   // end-of-speech (silence) detection timer
+  barge: null,          // recognition that listens for interruptions while speaking
 };
 
 // SpeechRecognition locale → Edge TTS language code (backend auto-detects too).
@@ -1182,6 +1183,7 @@ function openLiveVoice() {
 function closeLiveVoice() {
   LIVE.active = false;
   LIVE.gen++;                      // supersede any in-flight turn
+  liveStopBargeMonitor();
   liveStopRecognition();
   liveStopAudio();
   liveSetState('idle');
@@ -1236,6 +1238,7 @@ function liveStartListening() {
   if (!LIVE.active || LIVE.fatal || !liveSupported()) return;
   LIVE.gen++;                      // new turn supersedes any in-flight async flow
   LIVE.paused = false;
+  liveStopBargeMonitor();
   liveStopAudio();
   liveStopRecognition();
 
@@ -1253,7 +1256,7 @@ function liveStartListening() {
   // End-of-speech detection driven by the browser's voice-activity events: only
   // start the silence countdown once the mic reports speech has actually stopped,
   // so a pause mid-sentence (or sparse interim results) never cuts the user off.
-  const SILENCE_MS = 1600;
+  const SILENCE_MS = 700;
   const cancelStop = () => {
     if (LIVE.silenceTimer) { clearTimeout(LIVE.silenceTimer); LIVE.silenceTimer = null; }
   };
@@ -1400,12 +1403,13 @@ async function liveGetReply(conv) {
 
 async function liveSpeak(text) {
   liveSetState('speaking');
-  liveSetStatus('Speaking…');
+  liveSetStatus('Speaking… (just start talking to interrupt)');
 
   const clean = liveCleanForSpeech(text);
   if (!clean) return;
   const langCode = LIVE_TTS_LANG[LIVE.lang] || 'en';
 
+  liveStartBargeMonitor(clean);    // let the user cut in by speaking
   // Primary: Edge/Bing neural TTS from the backend. Fallback: browser speech.
   try {
     const fd = new FormData();
@@ -1419,6 +1423,48 @@ async function liveSpeak(text) {
   } catch (err) {
     console.warn('Live TTS fell back to browser speech:', err.message);
     await liveBrowserSpeak(clean, langCode);
+  } finally {
+    liveStopBargeMonitor();
+  }
+}
+
+// While the agent is speaking, run a lightweight recognizer that interrupts
+// playback the moment the user starts talking, then the normal flow resumes
+// listening. (Needs a couple of transcribed characters so a stray noise doesn't
+// trigger it; works best with headphones so the agent's own voice isn't heard.)
+function liveStartBargeMonitor(spokenText) {
+  if (!liveSupported()) return;
+  liveStopBargeMonitor();
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let mon;
+  try { mon = new Recognition(); } catch { return; }
+  LIVE.barge = mon;
+  mon.lang = LIVE.lang;
+  mon.interimResults = true;
+  mon.continuous = true;
+  const spoken = (spokenText || '').toLowerCase();
+  mon.onresult = (e) => {
+    let txt = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) txt += e.results[i][0].transcript;
+    const heard = txt.trim().toLowerCase();
+    if (heard.length < 2) return;
+    // Echo guard: if what we heard is part of what the agent is saying, it's the
+    // agent's own voice looping back — ignore it. Interrupt only on new words.
+    if (spoken.includes(heard)) return;
+    liveStopBargeMonitor();
+    liveStopAudio();               // interrupt → resolves the speak await → resumes listening
+  };
+  mon.onerror = () => {};
+  mon.onend = () => { if (LIVE.barge === mon) LIVE.barge = null; };
+  try { mon.start(); } catch {}
+}
+
+function liveStopBargeMonitor() {
+  const m = LIVE.barge;
+  LIVE.barge = null;
+  if (m) {
+    m.onresult = m.onerror = m.onend = null;
+    try { m.abort(); } catch {}
   }
 }
 
@@ -1702,7 +1748,7 @@ function interpStartListening() {
 
   // Wait for the speaker to actually finish (browser voice-activity events drive
   // the endpoint, so mid-sentence pauses never cut the turn short).
-  const SILENCE_MS = 1600;
+  const SILENCE_MS = 700;
   const cancelStop = () => {
     if (INTERP.silenceTimer) { clearTimeout(INTERP.silenceTimer); INTERP.silenceTimer = null; }
   };
