@@ -1256,18 +1256,21 @@ function liveStartListening() {
   let finalText = '';
   let speaking = false;
 
-  // End-of-speech detection driven by the browser's voice-activity events: only
-  // start the silence countdown once the mic reports speech has actually stopped,
-  // so a pause mid-sentence (or sparse interim results) never cuts the user off.
-  const SILENCE_MS = 700;
+  // End-of-speech detection: use a hybrid approach to balance speed and accuracy.
+  // We use browser's voice-activity events (onspeechstart/onspeechend) for a fast
+  // stop when the browser is confident (700ms), and a safety inactivity timer
+  // (2000ms) on each new result to ensure it stops quickly even if the browser
+  // is slow to fire the speech end event (which is common on desktop PC).
+  const INACTIVITY_MS = 2000;
+  const VAD_SILENCE_MS = 700;
   const cancelStop = () => {
     if (LIVE.silenceTimer) { clearTimeout(LIVE.silenceTimer); LIVE.silenceTimer = null; }
   };
-  const scheduleStop = () => {
+  const scheduleStop = (ms) => {
     cancelStop();
     LIVE.silenceTimer = setTimeout(() => {
       try { recog.stop(); } catch {}   // graceful stop → onend processes the text
-    }, SILENCE_MS);
+    }, ms);
   };
 
   recog.onstart = () => {
@@ -1280,19 +1283,27 @@ function liveStartListening() {
   recog.onaudiostart = cancelStop;
   recog.onsoundstart = cancelStop;
   recog.onspeechstart = () => { speaking = true; cancelStop(); };
-  recog.onspeechend = () => { speaking = false; scheduleStop(); };
+  recog.onspeechend = () => { speaking = false; scheduleStop(VAD_SILENCE_MS); };
 
   recog.onresult = (e) => {
+    let currentFinal = '';
     let interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
+    for (let i = 0; i < e.results.length; i++) {
       const r = e.results[i];
-      if (r.isFinal) finalText += r[0].transcript;
+      if (r.isFinal) currentFinal += r[0].transcript;
       else interim += r[0].transcript;
     }
+    finalText = currentFinal;
     liveSetTranscript((finalText + ' ' + interim).trim());
-    // Only count silence when the mic isn't actively hearing speech. This also
-    // serves as a fallback for browsers that don't fire onspeechend.
-    if (!speaking) scheduleStop();
+
+    // Schedule stop: if browser thinks speaking has ended, stop after VAD_SILENCE_MS.
+    // If browser still thinks speaking is active, schedule a safety stop after INACTIVITY_MS
+    // in case the browser's speech-end event is delayed or never fires.
+    if (!speaking) {
+      scheduleStop(VAD_SILENCE_MS);
+    } else {
+      scheduleStop(INACTIVITY_MS);
+    }
   };
 
   recog.onerror = (e) => {
@@ -1553,7 +1564,9 @@ function liveStartBargeMonitor(spokenText) {
   mon.continuous = true;
   mon.onresult = (e) => {
     let txt = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) txt += e.results[i][0].transcript;
+    for (let i = 0; i < e.results.length; i++) {
+      txt += e.results[i][0].transcript;
+    }
     const heard = txt.trim().toLowerCase();
     if (heard.length < 2) return;
     // Echo guard: if what we heard is part of what the agent is saying, it's the
@@ -1856,17 +1869,17 @@ function interpStartListening() {
   let finalText = '';
   let speaking = false;
 
-  // Wait for the speaker to actually finish (browser voice-activity events drive
-  // the endpoint, so mid-sentence pauses never cut the turn short).
-  const SILENCE_MS = 700;
+  // Wait for the speaker to actually finish: use a hybrid approach to balance speed and accuracy.
+  const INACTIVITY_MS = 2000;
+  const VAD_SILENCE_MS = 700;
   const cancelStop = () => {
     if (INTERP.silenceTimer) { clearTimeout(INTERP.silenceTimer); INTERP.silenceTimer = null; }
   };
-  const scheduleStop = () => {
+  const scheduleStop = (ms) => {
     cancelStop();
     INTERP.silenceTimer = setTimeout(() => {
       try { recog.stop(); } catch {}
-    }, SILENCE_MS);
+    }, ms);
   };
 
   recog.onstart = () => {
@@ -1876,16 +1889,26 @@ function interpStartListening() {
   recog.onaudiostart = cancelStop;
   recog.onsoundstart = cancelStop;
   recog.onspeechstart = () => { speaking = true; cancelStop(); };
-  recog.onspeechend = () => { speaking = false; scheduleStop(); };
+  recog.onspeechend = () => { speaking = false; scheduleStop(VAD_SILENCE_MS); };
   recog.onresult = (e) => {
+    let currentFinal = '';
     let interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
+    for (let i = 0; i < e.results.length; i++) {
       const r = e.results[i];
-      if (r.isFinal) finalText += r[0].transcript;
+      if (r.isFinal) currentFinal += r[0].transcript;
       else interim += r[0].transcript;
     }
+    finalText = currentFinal;
     interpSetStatus((finalText + ' ' + interim).trim() || 'Listening…');
-    if (!speaking) scheduleStop();
+
+    // Schedule stop: if browser thinks speaking has ended, stop after VAD_SILENCE_MS.
+    // If browser still thinks speaking is active, schedule a safety stop after INACTIVITY_MS
+    // in case the browser's speech-end event is delayed or never fires.
+    if (!speaking) {
+      scheduleStop(VAD_SILENCE_MS);
+    } else {
+      scheduleStop(INACTIVITY_MS);
+    }
   };
   recog.onerror = (e) => {
     if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
