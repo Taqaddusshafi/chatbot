@@ -1127,9 +1127,11 @@ const LIVE = {
   state: 'idle',        // idle | listening | thinking | speaking
   recog: null,
   audio: null,
+  audioResolve: null,   // resolves the in-flight speak promise when interrupted
   lang: 'en-US',
   fatal: false,         // mic permanently blocked
   paused: false,        // user paused via orb tap
+  gen: 0,               // turn generation — stale async flows bail when it changes
 };
 
 // SpeechRecognition locale → Edge TTS language code (backend auto-detects too).
@@ -1165,6 +1167,7 @@ function openLiveVoice() {
 
 function closeLiveVoice() {
   LIVE.active = false;
+  LIVE.gen++;                      // supersede any in-flight turn
   liveStopRecognition();
   liveStopAudio();
   liveSetState('idle');
@@ -1216,6 +1219,7 @@ function liveSetTranscript(text) {
 
 function liveStartListening() {
   if (!LIVE.active || LIVE.fatal || !liveSupported()) return;
+  LIVE.gen++;                      // new turn supersedes any in-flight async flow
   LIVE.paused = false;
   liveStopAudio();
   liveStopRecognition();
@@ -1292,6 +1296,7 @@ function liveStopRecognition() {
 }
 
 async function liveHandleUtterance(text) {
+  const myGen = LIVE.gen;          // this turn; bail if superseded mid-flight
   liveStopRecognition();
   liveSetState('thinking');
   liveSetStatus('Thinking…');
@@ -1313,6 +1318,7 @@ async function liveHandleUtterance(text) {
   } catch (err) {
     liveSetStatus('Connection error: ' + err.message);
   }
+  if (myGen !== LIVE.gen) return;  // interrupted/closed while thinking
 
   if (reply) {
     conv.messages.push({ role: 'assistant', content: reply });
@@ -1320,6 +1326,7 @@ async function liveHandleUtterance(text) {
     renderMessages();
     liveSetTranscript(reply);
     await liveSpeak(reply);
+    if (myGen !== LIVE.gen) return; // interrupted/closed while speaking
   }
 
   if (LIVE.active && !LIVE.paused) liveStartListening();
@@ -1378,11 +1385,16 @@ function livePlayBlob(blob) {
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
     LIVE.audio = audio;
+    let settled = false;
     const done = () => {
+      if (settled) return;
+      settled = true;
       URL.revokeObjectURL(url);
       if (LIVE.audio === audio) LIVE.audio = null;
+      if (LIVE.audioResolve === done) LIVE.audioResolve = null;
       resolve();
     };
+    LIVE.audioResolve = done;        // lets liveStopAudio() unblock a barge-in
     audio.onended = done;
     audio.onerror = done;
     audio.play().catch(done);
@@ -1393,13 +1405,21 @@ function liveBrowserSpeak(text, langCode) {
   return new Promise((resolve) => {
     const synth = window.speechSynthesis;
     if (!synth) { resolve(); return; }
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      if (LIVE.audioResolve === done) LIVE.audioResolve = null;
+      resolve();
+    };
+    LIVE.audioResolve = done;
     const u = new SpeechSynthesisUtterance(text);
     u.lang = LIVE.lang || 'en-US';
     u.rate = 1.0;
     const voice = synth.getVoices().find(v => v.lang && v.lang.toLowerCase().startsWith(langCode));
     if (voice) u.voice = voice;
-    u.onend = resolve;
-    u.onerror = resolve;
+    u.onend = done;
+    u.onerror = done;
     // Some browsers need a fresh cancel before speaking.
     try { synth.cancel(); } catch {}
     synth.speak(u);
@@ -1413,6 +1433,12 @@ function liveStopAudio() {
   }
   if (window.speechSynthesis && window.speechSynthesis.speaking) {
     try { window.speechSynthesis.cancel(); } catch {}
+  }
+  // pause()/cancel() don't fire ended/onend, so resolve the pending speak promise.
+  if (LIVE.audioResolve) {
+    const r = LIVE.audioResolve;
+    LIVE.audioResolve = null;
+    r();
   }
 }
 
@@ -1480,11 +1506,13 @@ const INTERP = {
   state: 'idle',     // idle | listening | translating | speaking
   recog: null,
   audio: null,
+  audioResolve: null,
   current: 'A',      // whose turn it is to speak
   langA: 'en',
   langB: 'hi',
   paused: false,
   fatal: false,
+  gen: 0,            // turn generation — stale async flows bail when it changes
 };
 
 function interpLang(code) {
@@ -1524,6 +1552,7 @@ function openInterpreter() {
 
 function closeInterpreter() {
   INTERP.active = false;
+  INTERP.gen++;                     // supersede any in-flight turn
   interpStopRecognition();
   interpStopAudio();
   interpSetState('idle');
@@ -1603,6 +1632,7 @@ function interpLog(speakerCode, original, targetCode, translation) {
 
 function interpStartListening() {
   if (!INTERP.active || INTERP.fatal || !liveSupported()) return;
+  INTERP.gen++;                     // new turn supersedes any in-flight async flow
   INTERP.paused = false;
   interpStopAudio();
   interpStopRecognition();
@@ -1677,6 +1707,7 @@ function interpStopRecognition() {
 }
 
 async function interpHandle(text) {
+  const myGen = INTERP.gen;        // this turn; bail if superseded mid-flight
   interpStopRecognition();
   interpSetState('translating');
 
@@ -1690,17 +1721,20 @@ async function interpHandle(text) {
   } catch (err) {
     interpSetStatus('Translation error: ' + err.message);
   }
+  if (myGen !== INTERP.gen) return; // interrupted/closed while translating
 
   if (translation) {
     interpLog(speakerCode, text, targetCode, translation);
     interpSetState('speaking');
     interpSetStatus(`Speaking — ${interpLang(targetCode).label.split(' —')[0]}`);
     await interpSpeakTTS(translation, targetCode);
+    if (myGen !== INTERP.gen) return; // interrupted/closed while speaking
   }
 
-  // Auto-alternate to the other speaker and keep the conversation flowing.
   if (INTERP.active && !INTERP.paused) {
-    INTERP.current = INTERP.current === 'A' ? 'B' : 'A';
+    // On success, hand the turn to the other speaker; on a failed translation,
+    // let the SAME speaker retry instead of bouncing turns on errors.
+    if (translation) INTERP.current = INTERP.current === 'A' ? 'B' : 'A';
     interpStartListening();
   }
 }
@@ -1742,11 +1776,16 @@ function interpPlayBlob(blob) {
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
     INTERP.audio = audio;
+    let settled = false;
     const done = () => {
+      if (settled) return;
+      settled = true;
       URL.revokeObjectURL(url);
       if (INTERP.audio === audio) INTERP.audio = null;
+      if (INTERP.audioResolve === done) INTERP.audioResolve = null;
       resolve();
     };
+    INTERP.audioResolve = done;      // lets interpStopAudio() unblock a barge-in
     audio.onended = done;
     audio.onerror = done;
     audio.play().catch(done);
@@ -1757,13 +1796,21 @@ function interpBrowserSpeak(text, langCode) {
   return new Promise((resolve) => {
     const synth = window.speechSynthesis;
     if (!synth) { resolve(); return; }
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      if (INTERP.audioResolve === done) INTERP.audioResolve = null;
+      resolve();
+    };
+    INTERP.audioResolve = done;
     const u = new SpeechSynthesisUtterance(text);
     u.lang = interpLang(langCode).locale;
     u.rate = 1.0;
     const voice = synth.getVoices().find(v => v.lang && v.lang.toLowerCase().startsWith(langCode));
     if (voice) u.voice = voice;
-    u.onend = resolve;
-    u.onerror = resolve;
+    u.onend = done;
+    u.onerror = done;
     try { synth.cancel(); } catch {}
     synth.speak(u);
   });
@@ -1776,5 +1823,11 @@ function interpStopAudio() {
   }
   if (window.speechSynthesis && window.speechSynthesis.speaking) {
     try { window.speechSynthesis.cancel(); } catch {}
+  }
+  // pause()/cancel() don't fire ended/onend, so resolve the pending speak promise.
+  if (INTERP.audioResolve) {
+    const r = INTERP.audioResolve;
+    INTERP.audioResolve = null;
+    r();
   }
 }
