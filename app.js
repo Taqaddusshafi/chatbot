@@ -1142,6 +1142,7 @@ const LIVE = {
   fatal: false,         // mic permanently blocked
   paused: false,        // user paused via orb tap
   gen: 0,               // turn generation — stale async flows bail when it changes
+  silenceTimer: null,   // end-of-speech (silence) detection timer
 };
 
 // SpeechRecognition locale → Edge TTS language code (backend auto-detects too).
@@ -1243,10 +1244,20 @@ function liveStartListening() {
   LIVE.recog = recog;
   recog.lang = LIVE.lang;
   recog.interimResults = true;
-  recog.continuous = false;
+  recog.continuous = true;         // stay on across pauses; we end on real silence
   recog.maxAlternatives = 1;
 
   let finalText = '';
+
+  // End-of-speech detection: only finalize after the user has been silent a
+  // moment, so a brief pause mid-sentence doesn't cut them off.
+  const SILENCE_MS = 1500;
+  const armSilence = () => {
+    if (LIVE.silenceTimer) clearTimeout(LIVE.silenceTimer);
+    LIVE.silenceTimer = setTimeout(() => {
+      try { recog.stop(); } catch {}   // graceful stop → onend processes the text
+    }, SILENCE_MS);
+  };
 
   recog.onstart = () => {
     liveSetState('listening');
@@ -1262,6 +1273,7 @@ function liveStartListening() {
       else interim += r[0].transcript;
     }
     liveSetTranscript((finalText + ' ' + interim).trim());
+    armSilence();                  // speech detected → (re)start the silence timer
   };
 
   recog.onerror = (e) => {
@@ -1276,6 +1288,7 @@ function liveStartListening() {
   };
 
   recog.onend = () => {
+    if (LIVE.silenceTimer) { clearTimeout(LIVE.silenceTimer); LIVE.silenceTimer = null; }
     if (LIVE.recog !== recog) return;       // a newer session took over
     LIVE.recog = null;
     if (!LIVE.active || LIVE.fatal || LIVE.paused) return;
@@ -1283,12 +1296,12 @@ function liveStartListening() {
     if (text) {
       liveHandleUtterance(text);
     } else {
-      // Heard nothing — keep listening (small delay avoids rapid-restart errors).
+      // Nothing captured (browser auto-ended) — keep listening seamlessly.
       setTimeout(() => {
         if (LIVE.active && !LIVE.paused && LIVE.state !== 'thinking' && LIVE.state !== 'speaking') {
           liveStartListening();
         }
-      }, 300);
+      }, 200);
     }
   };
 
@@ -1301,6 +1314,7 @@ function liveStartListening() {
 }
 
 function liveStopRecognition() {
+  if (LIVE.silenceTimer) { clearTimeout(LIVE.silenceTimer); LIVE.silenceTimer = null; }
   const r = LIVE.recog;
   LIVE.recog = null;
   if (r) {
@@ -1527,6 +1541,7 @@ const INTERP = {
   paused: false,
   fatal: false,
   gen: 0,            // turn generation — stale async flows bail when it changes
+  silenceTimer: null, // end-of-speech (silence) detection timer
 };
 
 function interpLang(code) {
@@ -1665,10 +1680,19 @@ function interpStartListening() {
   INTERP.recog = recog;
   recog.lang = loc;
   recog.interimResults = true;
-  recog.continuous = false;
+  recog.continuous = true;         // stay on across pauses; end on real silence
   recog.maxAlternatives = 1;
 
   let finalText = '';
+
+  // Wait for the speaker to actually finish before translating their turn.
+  const SILENCE_MS = 1500;
+  const armSilence = () => {
+    if (INTERP.silenceTimer) clearTimeout(INTERP.silenceTimer);
+    INTERP.silenceTimer = setTimeout(() => {
+      try { recog.stop(); } catch {}
+    }, SILENCE_MS);
+  };
 
   recog.onstart = () => {
     interpSetState('listening');
@@ -1682,6 +1706,7 @@ function interpStartListening() {
       else interim += r[0].transcript;
     }
     interpSetStatus((finalText + ' ' + interim).trim() || 'Listening…');
+    armSilence();
   };
   recog.onerror = (e) => {
     if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
@@ -1697,6 +1722,7 @@ function interpStartListening() {
     }
   };
   recog.onend = () => {
+    if (INTERP.silenceTimer) { clearTimeout(INTERP.silenceTimer); INTERP.silenceTimer = null; }
     if (INTERP.recog !== recog) return;
     INTERP.recog = null;
     if (!INTERP.active || INTERP.fatal || INTERP.paused) return;
@@ -1706,7 +1732,7 @@ function interpStartListening() {
     } else {
       setTimeout(() => {
         if (INTERP.active && !INTERP.paused && INTERP.state === 'listening') interpStartListening();
-      }, 300);
+      }, 200);
     }
   };
 
@@ -1718,6 +1744,7 @@ function interpStartListening() {
 }
 
 function interpStopRecognition() {
+  if (INTERP.silenceTimer) { clearTimeout(INTERP.silenceTimer); INTERP.silenceTimer = null; }
   const r = INTERP.recog;
   INTERP.recog = null;
   if (r) {
