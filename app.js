@@ -1144,6 +1144,8 @@ const LIVE = {
   gen: 0,               // turn generation — stale async flows bail when it changes
   silenceTimer: null,   // end-of-speech (silence) detection timer
   barge: null,          // recognition that listens for interruptions while speaking
+  barged: false,        // user cut in → abort the streaming speak pipeline
+  bargeSpoken: '',      // running text the agent is speaking (echo guard for barge-in)
 };
 
 // SpeechRecognition locale → Edge TTS language code (backend auto-detects too).
@@ -1238,6 +1240,7 @@ function liveStartListening() {
   if (!LIVE.active || LIVE.fatal || !liveSupported()) return;
   LIVE.gen++;                      // new turn supersedes any in-flight async flow
   LIVE.paused = false;
+  LIVE.barged = false;
   liveStopBargeMonitor();
   liveStopAudio();
   liveStopRecognition();
@@ -1359,148 +1362,178 @@ async function liveHandleUtterance(text) {
 
   let reply = '';
   try {
-    reply = await liveGetReply(conv);
+    // Stream the reply and speak it sentence-by-sentence so the agent starts
+    // talking within ~1s instead of waiting for the whole answer to generate.
+    reply = await liveStreamReplyAndSpeak(conv, myGen);
   } catch (err) {
     liveSetStatus('Connection error: ' + err.message);
   }
-  if (myGen !== LIVE.gen) return;  // interrupted/closed while thinking
+  if (myGen !== LIVE.gen) return;  // interrupted/closed mid-flight
 
   if (reply) {
     conv.messages.push({ role: 'assistant', content: reply });
     saveConversations();
     renderMessages();
-    liveSetTranscript(reply);
-    await liveSpeak(reply);
-    if (myGen !== LIVE.gen) return; // interrupted/closed while speaking
   }
 
   if (LIVE.active && !LIVE.paused) liveStartListening();
 }
 
-async function liveGetReply(conv) {
+// Tiny async queue: producers push()/close(), the consumer awaits next().
+function liveQueue() {
+  const items = [];
+  let done = false;
+  let waiter = null;
+  const wake = () => { if (waiter) { const w = waiter; waiter = null; w(); } };
+  return {
+    push(x) { items.push(x); wake(); },
+    close() { done = true; wake(); },
+    async next() {
+      while (true) {
+        if (items.length) return { value: items.shift() };
+        if (done) return { done: true };
+        await new Promise((res) => { waiter = res; });
+      }
+    },
+  };
+}
+
+// Split a buffer into complete sentences, keeping any trailing partial as `rest`.
+// Only breaks on terminators followed by whitespace, so decimals/abbreviations
+// ("3.5", "Dr.") aren't split into separate TTS requests.
+function liveSplitSentences(buf) {
+  const out = [];
+  const re = /[.!?。！？…]+["')\]]?\s+|\n+/g;
+  let last = 0, m;
+  while ((m = re.exec(buf)) !== null) {
+    const end = m.index + m[0].length;
+    const seg = buf.slice(last, end).trim();
+    if (seg) out.push(seg);
+    last = end;
+  }
+  return { sentences: out, rest: buf.slice(last) };
+}
+
+// Three-stage pipeline so audio starts fast and plays gaplessly:
+//   producer (LLM stream → sentences) → fetcher (sentence → TTS audio) → player.
+// The fetcher runs one sentence ahead of the player, hiding TTS latency.
+async function liveStreamReplyAndSpeak(conv, myGen) {
   const messages = conv.messages
     .filter(m => m.meta?.type !== 'translation')
     .filter(m => !(m.role === 'assistant' && m.content.startsWith('⚠️')))
     .map(m => ({ role: m.role, content: m.content }));
-
-  const resp = await fetch(apiUrl('/chat'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      messages,
-      temperature: config.temperature,
-      max_tokens: config.maxTokens,
-      stream: false,
-    }),
-  });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-    throw new Error(err.detail || `HTTP ${resp.status}`);
-  }
-  const data = await resp.json();
-  return (data.choices?.[0]?.message?.content || '').trim();
-}
-
-async function liveSpeak(text) {
-  liveSetState('speaking');
-  liveSetStatus('Speaking… (just start talking to interrupt)');
-
-  const clean = liveCleanForSpeech(text);
-  if (!clean) return;
   const langCode = LIVE_TTS_LANG[LIVE.lang] || 'en';
 
-  liveStartBargeMonitor(clean);    // let the user cut in by speaking
-  // Primary: Edge/Bing neural TTS from the backend. Fallback: browser speech.
-  try {
-    const fd = new FormData();
-    fd.append('text', clean);
-    fd.append('language', langCode);
-    const resp = await fetch(apiUrl('/voice/tts'), { method: 'POST', body: fd });
-    if (!resp.ok) throw new Error(`TTS ${resp.status}`);
+  LIVE.barged = false;
+  const aborted = () => myGen !== LIVE.gen || LIVE.barged;
 
-    // Stream playback so the voice starts on the first chunk (~instant) instead
-    // of waiting for the whole clip to download.
-    const canStream = window.MediaSource
-      && typeof MediaSource.isTypeSupported === 'function'
-      && MediaSource.isTypeSupported('audio/mpeg')
-      && resp.body;
-    if (canStream) {
-      await liveStreamPlay(resp);
-    } else {
-      const blob = await resp.blob();
-      if (blob.size === 0) throw new Error('empty audio');
-      await livePlayBlob(blob);
-    }
-  } catch (err) {
-    console.warn('Live TTS fell back to browser speech:', err.message);
-    await liveBrowserSpeak(clean, langCode);
-  } finally {
-    liveStopBargeMonitor();
-  }
-}
+  const textQ = liveQueue();   // complete sentences (strings)
+  const audioQ = liveQueue();  // { clean, blob } or { clean, fallback: true }
+  let fullText = '';
 
-// Stream MP3 via MediaSource: playback begins as soon as the first chunk lands.
-function liveStreamPlay(resp) {
-  return new Promise((resolve, reject) => {
-    const mediaSource = new MediaSource();
-    const audio = new Audio();
-    audio.src = URL.createObjectURL(mediaSource);
-    LIVE.audio = audio;
-
-    let settled = false;
-    let gotAudio = false;
-    const finish = (err) => {
-      if (settled) return;
-      settled = true;
-      if (LIVE.audio === audio) LIVE.audio = null;
-      if (LIVE.audioResolve === finish) LIVE.audioResolve = null;
-      try { URL.revokeObjectURL(audio.src); } catch {}
-      if (err && !gotAudio) reject(err);   // nothing played → let caller fall back
-      else resolve();
-    };
-    LIVE.audioResolve = finish;            // barge-in/stop resolves cleanly
-
-    audio.onended = () => finish();
-    audio.onerror = () => finish(gotAudio ? null : new Error('audio error'));
-
-    mediaSource.addEventListener('sourceopen', async () => {
-      let sb;
-      try { sb = mediaSource.addSourceBuffer('audio/mpeg'); }
-      catch (e) { finish(e); return; }
-
-      const reader = resp.body.getReader();
-      const queue = [];
-      let streamDone = false;
-      let started = false;
-
-      const pump = () => {
-        if (sb.updating || queue.length === 0) {
-          if (streamDone && queue.length === 0 && !sb.updating) {
-            try { if (mediaSource.readyState === 'open') mediaSource.endOfStream(); } catch {}
-          }
-          return;
-        }
-        try { sb.appendBuffer(queue.shift()); } catch {}
-      };
-
-      sb.addEventListener('updateend', () => {
-        if (!started && audio.paused) { audio.play().catch(() => {}); started = true; }
-        pump();
-      });
-
+  // Fetcher: turn each sentence into TTS audio, running ahead of playback.
+  const fetcher = (async () => {
+    while (true) {
+      const { value, done } = await textQ.next();
+      if (done) break;
+      if (aborted()) break;
+      const clean = liveCleanForSpeech(value);
+      if (!clean) continue;
       try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) { streamDone = true; pump(); break; }
-          gotAudio = true;
-          queue.push(value);
-          pump();
-        }
-      } catch { streamDone = true; }
+        const fd = new FormData();
+        fd.append('text', clean);
+        fd.append('language', langCode);
+        const resp = await fetch(apiUrl('/voice/tts'), { method: 'POST', body: fd });
+        if (!resp.ok) throw new Error(`TTS ${resp.status}`);
+        const blob = await resp.blob();
+        if (blob.size === 0) throw new Error('empty audio');
+        audioQ.push({ clean, blob });
+      } catch (err) {
+        audioQ.push({ clean, fallback: true });   // play via browser speech instead
+      }
+    }
+    audioQ.close();
+  })();
 
-      if (!gotAudio) finish(new Error('no audio'));   // empty → fall back to browser
+  // Player: play audio chunks in order; barge monitor runs for the whole turn.
+  const player = (async () => {
+    liveStartBargeMonitor('');
+    try {
+      while (true) {
+        const { value, done } = await audioQ.next();
+        if (done) break;
+        if (aborted()) break;
+        if (LIVE.state !== 'speaking') {
+          liveSetState('speaking');
+          liveSetStatus('Speaking… (just start talking to interrupt)');
+        }
+        LIVE.bargeSpoken += ' ' + value.clean.toLowerCase();
+        if (value.fallback) await liveBrowserSpeak(value.clean, langCode);
+        else await livePlayBlob(value.blob);
+        if (aborted()) break;
+      }
+    } finally {
+      liveStopBargeMonitor();
+    }
+  })();
+
+  // Producer: stream the LLM reply and emit complete sentences as they form.
+  let rest = '';
+  try {
+    const resp = await fetch(apiUrl('/chat'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages,
+        temperature: config.temperature,
+        max_tokens: config.maxTokens,
+        stream: true,
+      }),
     });
-  });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+      throw new Error(err.detail || `HTTP ${resp.status}`);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      if (aborted()) { try { await reader.cancel(); } catch {} break; }
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const dataStr = line.slice(6).trim();
+        if (!dataStr || dataStr === '[DONE]') continue;
+        let data;
+        try { data = JSON.parse(dataStr); } catch { continue; }
+        if (data.error) throw new Error(data.error);
+        if (!data.content) continue;
+        fullText += data.content;
+        rest += data.content;
+        const { sentences, rest: r } = liveSplitSentences(rest);
+        rest = r;
+        for (const s of sentences) textQ.push(s);
+        // Nothing flushed yet but the clause is long → break at the last space so
+        // the first words start playing without waiting for a full sentence.
+        if (sentences.length === 0 && rest.length > 160) {
+          const cut = rest.lastIndexOf(' ');
+          if (cut > 40) { textQ.push(rest.slice(0, cut).trim()); rest = rest.slice(cut + 1); }
+        }
+      }
+    }
+  } finally {
+    if (rest.trim() && !aborted()) textQ.push(rest.trim());
+    textQ.close();
+  }
+
+  await fetcher;
+  await player;
+  return fullText.trim();
 }
 
 // While the agent is speaking, run a lightweight recognizer that interrupts
@@ -1514,10 +1547,10 @@ function liveStartBargeMonitor(spokenText) {
   let mon;
   try { mon = new Recognition(); } catch { return; }
   LIVE.barge = mon;
+  LIVE.bargeSpoken = (spokenText || '').toLowerCase();
   mon.lang = LIVE.lang;
   mon.interimResults = true;
   mon.continuous = true;
-  const spoken = (spokenText || '').toLowerCase();
   mon.onresult = (e) => {
     let txt = '';
     for (let i = e.resultIndex; i < e.results.length; i++) txt += e.results[i][0].transcript;
@@ -1525,7 +1558,9 @@ function liveStartBargeMonitor(spokenText) {
     if (heard.length < 2) return;
     // Echo guard: if what we heard is part of what the agent is saying, it's the
     // agent's own voice looping back — ignore it. Interrupt only on new words.
-    if (spoken.includes(heard)) return;
+    // (bargeSpoken grows as each sentence is spoken, so the guard stays accurate.)
+    if (LIVE.bargeSpoken.includes(heard)) return;
+    LIVE.barged = true;            // signal the streaming pipeline to stop speaking
     liveStopBargeMonitor();
     liveStopAudio();               // interrupt → resolves the speak await → resumes listening
   };
