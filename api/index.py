@@ -493,6 +493,21 @@ EDGE_TTS_VOICES = {
     "pt": "pt-BR-FranciscaNeural",    # Portuguese
     "ja": "ja-JP-NanamiNeural",       # Japanese
     "ko": "ko-KR-SunHiNeural",        # Korean
+    "id": "id-ID-GadisNeural",        # Indonesian
+    "vi": "vi-VN-HoaiMyNeural",       # Vietnamese
+    "th": "th-TH-PremwadeeNeural",    # Thai
+    "pl": "pl-PL-ZofiaNeural",        # Polish
+    "nl": "nl-NL-ColetteNeural",      # Dutch
+    "uk": "uk-UA-PolinaNeural",       # Ukrainian
+    "he": "he-IL-HilaNeural",         # Hebrew
+    "el": "el-GR-AthinaNeural",       # Greek
+    "sv": "sv-SE-SofieNeural",        # Swedish
+    "ro": "ro-RO-AlinaNeural",        # Romanian
+    "hu": "hu-HU-NoemiNeural",        # Hungarian
+    "cs": "cs-CZ-VlastaNeural",       # Czech
+    "ms": "ms-MY-YasminNeural",       # Malay
+    "fil": "fil-PH-BlessicaNeural",   # Filipino
+    "sw": "sw-KE-ZuriNeural",         # Swahili
 }
 
 # ── Unicode script detection regexes ──────────────────────────────────────────
@@ -595,7 +610,9 @@ async def voice_tts(
 ):
     """Generate natural speech using Microsoft Edge Neural TTS.
 
-    Streams audio chunks as they arrive for instant playback start.
+    Buffers the full audio with retries so a transient WebSocket failure to
+    Microsoft (common on serverless) never yields partial/empty audio that would
+    push the client onto its robotic browser-speech fallback.
     """
     import edge_tts
 
@@ -612,19 +629,41 @@ async def voice_tts(
     else:
         selected_voice = EDGE_TTS_VOICES["en"]  # fallback
 
-    async def audio_stream():
-        """Yield audio chunks as they arrive from Edge TTS."""
-        try:
-            communicate = edge_tts.Communicate(text, selected_voice)
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    yield chunk["data"]
-        except Exception:
-            # Stream will just end — client handles incomplete audio gracefully
-            return
+    async def synthesize() -> bytes:
+        """Collect the full MP3 from Edge TTS, retrying transient failures."""
+        last_exc = None
+        for attempt in range(3):
+            buf = bytearray()
+            try:
+                communicate = edge_tts.Communicate(text, selected_voice)
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        buf.extend(chunk["data"])
+                if buf:
+                    return bytes(buf)
+            except Exception as exc:  # transient WSS/network error — retry
+                last_exc = exc
+        if last_exc:
+            raise last_exc
+        return b""
 
-    return StreamingResponse(
-        audio_stream(),
+    try:
+        audio = await synthesize()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"TTS engine error: {exc}",
+        )
+
+    if not audio:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="TTS engine returned no audio.",
+        )
+
+    # Return the complete clip so the client always gets full neural audio.
+    return Response(
+        content=audio,
         media_type="audio/mpeg",
         headers={
             "X-TTS-Voice": selected_voice,
