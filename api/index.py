@@ -192,6 +192,10 @@ class TranslateRequest(BaseModel):
         description="Target language code (e.g. 'en', 'ar', 'hi', 'fr'). "
         "Auto-detects an Arabic↔English flip when omitted.",
     )
+    engine: str = Field(
+        default="llm",
+        description="'llm' = AI model translation (default), 'api' = free Google translation API.",
+    )
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -200,6 +204,22 @@ class TranslateRequest(BaseModel):
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "service": "chatbot"}
+
+
+@app.get("/api/models")
+async def models():
+    """List available LLM models from vLLM (mirrors server/main.py)."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{VLLM_BASE_URL}/models",
+                headers={"Authorization": f"Bearer {VLLM_API_KEY}"},
+            )
+            r.raise_for_status()
+            data = r.json()
+            return {"models": data.get("data", []), "default": VLLM_MODEL}
+    except Exception:
+        return {"models": [{"id": VLLM_MODEL, "object": "model"}], "default": VLLM_MODEL}
 
 
 @app.get("/api/engine-health")
@@ -415,6 +435,44 @@ async def translate(request: TranslateRequest):
     if target_lang not in LANGUAGE_NAMES:
         target_lang = "en"
 
+    # ── Google free API engine path ──────────────────────────────────────────
+    # The frontend sends engine='api' when the user picks the ⚡ Translation API
+    # toggle. This path mirrors server/main.py:translate_via_api() so the feature
+    # works identically on Vercel.
+    if request.engine == "api":
+        try:
+            google_url = "https://translate.googleapis.com/translate_a/single"
+            params = {
+                "client": "gtx",
+                "sl": "auto",
+                "tl": target_lang,
+                "dt": "t",
+                "q": request.text,
+            }
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    google_url,
+                    params=params,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            # Response: [[[translated, original, ...], ...], ..., detected_lang, ...]
+            segments = data[0] or []
+            translation = "".join(seg[0] for seg in segments if seg and seg[0])
+            detected = data[2] if len(data) > 2 and data[2] else source_lang
+            return {
+                "translation": translation.strip(),
+                "source_lang": detected,
+                "target_lang": target_lang,
+            }
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Google translation API unreachable: {exc}",
+            )
+
+    # ── LLM engine path (default) ────────────────────────────────────────────
     target_name = LANGUAGE_NAMES[target_lang]
     system_prompt = build_translate_prompt(target_name)
     user_msg = build_translate_user_msg(request.text, target_name)
