@@ -1,170 +1,129 @@
-# ConversaAI Chatbot with Voice Gateway Integration
+# ConversaAI Platform
 
-A professional, high-performance web interface and FastAPI backend proxy for **LLaMA 3.1 8B-Instruct** (hosted via **vLLM** on your GPU server). It seamlessly integrates with your existing **Voice Gateway** endpoints (`185.14.252.20`) to handle Speech-to-Text (STT) and Text-to-Speech (TTS).
+A scalable, secure multi-microservice AI platform: **chat + translation + voice
+(STT/TTS)**, fronted by an API gateway that manages access with API keys. Built so
+one gateway key unlocks every feature, and the model/engines stay private behind it.
+
+> Detailed docs: **[ARCHITECTURE.md](ARCHITECTURE.md)** ·
+> **[BACKEND_GUIDE.md](BACKEND_GUIDE.md)** · **[FRONTEND_GUIDE.md](FRONTEND_GUIDE.md)**
 
 ---
 
-## 🏗️ Architecture & Port Mappings
+## Services (microservices)
 
-```mermaid
-flowchart TD
-    UI["🖥️ Premium Web UI\n(HTML/CSS/JS)"] <-->|"Proxy requests via /api/*"| BE["⚡ Chatbot Backend\n(FastAPI / Vercel Serverless)"]
-    
-    subgraph "GPU Infrastructure (185.14.252.20)"
-        BE <-->|"Port 8007: Chat & Translation"| VLLM["🦙 vLLM Engine\n(LLaMA 3.1 8B-Instruct)"]
-        BE <-->|"Port 8000: /v1/tts"| TTS["🔊 TTS Engine"]
-        BE <-->|"Port 8002: /v1/stt"| STT["🎙️ STT Engine"]
-    end
+| # | Service | Repo / path | Port | Role |
+|---|---|---|---|---|
+| 1 | **Frontend** | `chatbot/` (index.html, app.js) | — | Chat / translate / live-voice UI |
+| 2 | **Gateway** | `voice-gateway_1/` | 8001 | Auth (API key), rate-limit, proxy, chat history, async voice jobs — **owns the DB** |
+| 3 | **LLM service** | `chatbot/server/` | 8008 | Chat, translate (LLM + free Google), **Edge/Bing TTS**, STT proxy |
+| 4 | **vLLM (model)** | GPU host (`server/gpu_setup.sh`) | 8007 | Llama 3.1 8B — OpenAI-compatible |
+| 5 | **STT engine** | `kdext_conversa_ai_stt/` (Desktop) | 8002 | faster-whisper large-v3 · `POST /v1/stt` |
+| 6 | **TTS engine** | `kdext_conversa_ai_tts/` (home dir) | 8000 | Indic-Parler / Bark · `POST /v1/tts` |
+| 7 | **Voice worker** | `voice-worker/` | 8006 | SQS consumer: async TTS/STT → S3 → DB → webhook |
+
+Shared infra: **Postgres (RDS)** · **S3** (audio) · **SQS** (async queues).
+The **only database is the gateway's Postgres**; every other service is stateless.
+
+---
+
+## Architecture
+
+```
+                       Internet (HTTPS) ── only the gateway is public
+                                 │  X-API-Key (per user)
+                    ┌────────────▼─────────────┐
+                    │   Gateway :8001 (N pods)  │ auth · rate-limit · proxy · history
+                    └─┬──────────┬───────────┬──┘
+         X-Service-Key│          │ SQL(pool) │ enqueue
+                      ▼          ▼           ▼
+        ┌─────────────────┐  ┌────────┐   ┌─────┐    ┌──────────────┐
+        │ LLM service:8008│  │Postgres│   │ SQS │───▶│ Voice worker │──▶ S3
+        │ (N pods)        │  │  RDS   │   └─────┘    └──────┬───────┘
+        └─┬──────┬────────┘  └────────┘                    │
+  VLLM key│      │ Edge TTS (built-in)             ┌────────┴────────┐
+     ┌────▼────┐ └─────────────────────────────────▶ STT:8002  TTS:8000
+     │vLLM:8007│   (LLM service also calls STT)     (whisper) (parler/bark)
+     └─────────┘
 ```
 
-| Service | Host | Port | Endpoint / Path | Purpose |
-| :--- | :--- | :--- | :--- | :--- |
-| **vLLM Engine** | `185.14.252.20` | **8007** | `/v1/chat/completions` | Large Language Model (Inference) |
-| **TTS Engine** | `185.14.252.20` | **8000** | `/v1/tts` | Text-to-Speech (Audio output) |
-| **STT Engine** | `185.14.252.20` | **8002** | `/v1/stt` | Speech-to-Text (Voice input) |
-| **Local Proxy Backend** | `localhost` | **8008** | `/api/*` | Local development API gateway |
+**Two voice paths by design:**
+- **Real-time (live chatbot):** frontend → gateway → LLM service → vLLM + **Edge TTS** + STT:8002. Streaming, low latency.
+- **Managed/async API:** client → gateway `/text-to-speech` `/speech-to-text` → SQS → worker → **TTS:8000 / STT:8002** → S3 + DB + webhook.
 
 ---
 
-## 🚀 Getting Started
+## Database (gateway Postgres — single source of truth)
 
-### 1. Local Development (Backend & Frontend)
+8 tables, owned by Alembic migrations (`alembic upgrade head`):
 
-#### Prerequisites
-* Python 3.10+
-* Local dependencies: `pip install -r server/requirements.txt`
+`users` · `conversations` · `chat_messages` · `text_to_speech` ·
+`speech_to_text` · `otp_verifications` · `rate_limits` · `error_logs`
 
-#### Steps
-1. Navigate to the `server` directory and copy `.env.example` to `.env`:
-   ```bash
-   cp server/.env.example server/.env
-   ```
-2. Open `server/.env` and verify the settings:
-   ```env
-   PORT=8008
-   VLLM_BASE_URL=http://185.14.252.20:8007/v1
-   VLLM_API_KEY=EMPTY   # Change this to your API Key if secured
-   VLLM_MODEL=meta-llama/Llama-3.1-8B-Instruct
-   
-   TTS_ENGINE_URL=http://185.14.252.20:8000
-   STT_ENGINE_URL=http://185.14.252.20:8002
-   ```
-3. Run the local backend:
-   ```bash
-   python server/main.py
-   ```
-4. Access the web interface at **`http://localhost:8008`**.
-5. Check health check stats directly at **`http://localhost:8008/api/engine-health`**.
+The worker shares these tables (ORM kept identical to the gateway — verified).
+STT/TTS/vLLM/LLM services never touch the DB. Full column list in
+[ARCHITECTURE.md](ARCHITECTURE.md#final-database-schema-gateway-postgres--the-single-source-of-truth).
 
 ---
 
-### 2. GPU Server Setup (vLLM Engine)
+## Security (defense in depth)
 
-If you need to install or start the vLLM engine on the GPU server at `185.14.252.20`:
-
-1. Copy [gpu_setup.sh](file:///Users/taqaddusshafi/Desktop/chatbot/server/gpu_setup.sh) to your GPU host.
-2. Initialize the environment:
-   ```bash
-   export HF_TOKEN=your_hugging_face_token_here
-   chmod +x gpu_setup.sh
-   ./gpu_setup.sh
-   ```
-3. Start the service (runs on port **`8007`**):
-   ```bash
-   ./start_server.sh
-   ```
-
-> [!TIP]
-> **Securing the vLLM Server:**
-> Since your GPU is exposed on a public IP, secure it by adding `--api-key your_secret_key` when launching `vllm serve`. Then update `VLLM_API_KEY` to match it in your chatbot `.env`.
+1. **Edge:** TLS; only the gateway is public.
+2. **User key** (`X-API-Key`) — one key = all features, per user, rate-limited, revocable.
+3. **Service key** (`X-Service-Key`) — gateway→LLM; direct `:8008` hit → 401.
+4. **Model key** — `vllm serve --api-key` + `VLLM_API_KEY`.
+5. **Network** — firewall each port to the caller in front (`8007`←LLM, `8008`←gateway, `8000/8002`←LLM+worker); engines have no public IP.
 
 ---
 
-### 3. Deploying to Vercel (Production)
+## Scalability ✅
 
-This repository is pre-configured for instant deployment on Vercel:
+- **Stateless replicas** for gateway, LLM service, and worker → scale horizontally.
+- **Connection pooling:** gateway→LLM shared `httpx` client (200 conns/worker);
+  gateway→DB `QueuePool` (`DB_POOL_SIZE`/`DB_MAX_OVERFLOW`/`pool_recycle`).
+- **End-to-end streaming** (SSE chat, MP3 TTS) → fast first byte, flat memory.
+- **GPU tiers scale by replicas** behind balancers (`VLLM_BASE_URL`, `*_ENGINE_URL`).
+- **Async offload** via SQS + worker pods (`USE_ASYNC_QUEUE`); worker processes
+  each batch concurrently with SQS retries + DLQ.
+- **DB:** add a read replica for history/listing reads.
 
-1. Deploy the directory using the Vercel CLI or connect it to GitHub:
-   ```bash
-   vercel
-   ```
-2. Configure these Environment Variables on your Vercel Project Dashboard:
-   - `VLLM_BASE_URL` = `http://185.14.252.20:8007/v1`
-   - `VLLM_API_KEY` = `EMPTY` (or your custom API key)
-   - `VLLM_MODEL` = `meta-llama/Llama-3.1-8B-Instruct`
-   - `TTS_ENGINE_URL` = `http://185.14.252.20:8000`
-   - `STT_ENGINE_URL` = `http://185.14.252.20:8002`
+Scale order: GPU engines → LLM/worker pods → gateway pods → Postgres.
 
 ---
 
-## 🧪 Verification & Testing Commands
-
-Verify connection health using these simple curl requests:
+## Quick start (local)
 
 ```bash
-# 1. Test local proxy health
-curl http://localhost:8008/api/health
+# 1. Model (GPU host)
+./chatbot/server/gpu_setup.sh && ./start_server.sh          # vLLM :8007
 
-# 2. Check engine connectivity (vLLM, TTS, STT)
-curl http://localhost:8008/api/engine-health
+# 2. STT + TTS engines
+cd kdext_conversa_ai_stt && python run.py                   # :8002
+cd kdext_conversa_ai_tts && python run.py                   # :8000
 
-# 3. Test LLM Chat streaming
-curl -X POST http://localhost:8008/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Hello"}], "stream": false}'
+# 3. LLM service
+cd chatbot && pip install -r server/requirements.txt
+uvicorn server.main:app --port 8008                         # :8008
 
-# 4. Test Translation (Auto-detects language and translates)
-curl -X POST http://localhost:8008/api/translate \
-  -H "Content-Type: application/json" \
-  -d '{"text":"Good morning, how are you?"}'
+# 4. Gateway
+cd voice-gateway_1 && alembic upgrade head
+uvicorn app.main:app --port 8001                            # :8001
 ```
 
----
-
-## 🔌 AI Gateway Integration (OpenAI-compatible)
-
-This service is a **stateless microservice** and exposes a standard **OpenAI-compatible** surface, so any AI gateway (Kong AI Gateway, Portkey, LiteLLM, Cloudflare AI Gateway, OpenRouter, LangChain, …) can register it as an OpenAI-style provider.
-
-| Endpoint | Method | Contract |
-| :--- | :--- | :--- |
-| `/v1/chat/completions` | `POST` | OpenAI chat completions — streaming **and** non-streaming. Transparent proxy to vLLM, so `usage`, `id`, and `finish_reason` are preserved. |
-| `/v1/models` | `GET` | OpenAI model list (proxied from vLLM). |
-
-The default chat system prompt is injected **only when the caller does not provide a `system` message**, so gateways retain full control of behavior.
-
-Point your gateway's provider **base URL** at this service and use the OpenAI SDK directly:
-
+Verify:
 ```bash
-# Non-streaming
-curl -X POST https://<your-app>.vercel.app/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer ANY" \
-  -d '{"model":"meta-llama/Llama-3.1-8B-Instruct","messages":[{"role":"user","content":"Hello"}]}'
-
-# Streaming
-curl -N -X POST https://<your-app>.vercel.app/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Hello"}],"stream":true}'
+curl http://localhost:8008/api/engine-health                # llm/tts/stt all ok
+curl -X POST http://localhost:8001/api/chat \
+  -H "X-API-Key: <key>" -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Hello"}],"stream":false}'
 ```
 
-```python
-# OpenAI SDK — just change base_url to this microservice
-from openai import OpenAI
-client = OpenAI(base_url="https://<your-app>.vercel.app/v1", api_key="ANY")
-resp = client.chat.completions.create(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    messages=[{"role": "user", "content": "Hello"}],
-)
-```
-
-> The `/api/*` endpoints (`/api/chat`, `/api/translate`, `/api/voice/stt`) remain available for the bundled web UI; `/v1/*` is the gateway-facing contract.
+See **[BACKEND_GUIDE.md](BACKEND_GUIDE.md)** for full deploy (DB, secrets, firewalling)
+and **[FRONTEND_GUIDE.md](FRONTEND_GUIDE.md)** for client integration.
 
 ---
 
-## ✨ Key Features Included
-
-* **Streaming SSE Chat:** True word-by-word real-time generation.
-* **Premium Glassmorphic UI:** Smooth dark mode layouts, typography (Inter & Noto Sans Arabic), micro-animations, and dynamic status dots.
-* **RTL Language Detection:** Automatic right-to-left layout formatting for Arabic messages.
-* **Integrated translation mode:** Simple toggle to swap between conversational chatbot and high-fidelity translator.
-* **Voice input (STT):** Record from the mic and auto-transcribe to text via the STT engine.
+## Features
+- Streaming SSE chat · translation (AI model **or** free Google API toggle)
+- Live hands-free voice (STT → LLM → TTS) with barge-in and sentence-streaming
+- Neural TTS (Edge/Bing multilingual + Indic-Parler/Bark) · Whisper STT
+- Server-side chat history · OpenAI-compatible `/v1/*` surface · per-user metering
