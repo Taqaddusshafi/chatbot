@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     vllm_model: str = "meta-llama/Llama-3.1-8B-Instruct"
     vllm_timeout: float = 120.0
 
+    # Service API key — a shared secret the gateway must send (X-Service-Key) to
+    # reach the model endpoints. Blocks direct-IP bypass of the gateway.
+    # Empty = open (no service-key check), for standalone/dev use.
+    service_api_key: str = ""
+
     # Generation defaults
     default_temperature: float = 0.7
     default_max_tokens: int = 2048

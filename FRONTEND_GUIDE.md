@@ -15,18 +15,21 @@ Frontend ──X-API-Key──▶ Gateway (:8001) ──▶ LLM service (:8008) 
 ```js
 // One place to configure everything.
 const GATEWAY_URL = "https://your-gateway-host:8001";  // no trailing slash
-const API_KEY = localStorage.getItem("api_key") || "";  // user's gateway key
+const API_KEY = localStorage.getItem("api_key") || "";  // the user's gateway key
 
-// Every call sends the API key. JSON calls also set Content-Type.
+// One key unlocks every feature. Send it on every call.
 function authHeaders(extra = {}) {
   return { "X-API-Key": API_KEY, ...extra };
 }
 function api(path) { return `${GATEWAY_URL}${path}`; }
 ```
 
-> If the gateway runs with `LLM_REQUIRE_API_KEY=false`, the `X-API-Key` header is
-> optional. With `true` (production), every `/api/*` and `/v1/*` call needs it or
-> you get **401**.
+> **One API key = all features.** The gateway requires `X-API-Key` on every
+> endpoint — chat, translate, voice, and history. A single gateway key is the
+> credential for the whole platform; without it you get **401**.
+>
+> The key is checked **only at the gateway**. Internally the model stays keyless
+> (gateway → LLM service → vLLM/llama), so you manage access in exactly one place.
 
 ---
 
@@ -203,4 +206,4 @@ every user + assistant turn so history survives across devices (instead of only
 | OpenAI API | `POST /v1/chat/completions` | OpenAI JSON | OpenAI response |
 | History | `… /conversations …` | see §6 | conversation/message JSON |
 
-Every row requires the `X-API-Key` header in production.
+Every row requires the same `X-API-Key` — one gateway key unlocks all features.

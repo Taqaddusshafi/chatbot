@@ -60,9 +60,14 @@ PORT=8008
 
 # The model (Tier 1) — OpenAI-compatible vLLM endpoint
 VLLM_BASE_URL=http://GPU_HOST:8007/v1
-VLLM_API_KEY=EMPTY
+VLLM_API_KEY=EMPTY              # set to the vLLM --api-key secret if you key vLLM
 VLLM_MODEL=meta-llama/Llama-3.1-8B-Instruct
 VLLM_TIMEOUT=120
+
+# Service key — the gateway must send this as X-Service-Key to reach the model.
+# Blocks direct-IP bypass. Must match the gateway's LLM_SERVICE_API_KEY.
+# Leave empty for open/standalone dev. Generate: openssl rand -hex 32
+SERVICE_API_KEY=change-me-to-a-long-random-secret
 
 # Generation defaults
 DEFAULT_TEMPERATURE=0.7
@@ -145,8 +150,14 @@ API-key management. In the **gateway** repo's `.env`:
 ```ini
 LLM_SERVICE_URL=http://LLM_HOST:8008     # where Tier 2 runs
 LLM_SERVICE_TIMEOUT=120
-LLM_REQUIRE_API_KEY=true                 # external users need an X-API-Key
+LLM_REQUIRE_API_KEY=true                  # one gateway key unlocks ALL features
+LLM_SERVICE_API_KEY=<same secret as the LLM service's SERVICE_API_KEY>
 ```
+
+> The two keys are different layers: clients send a **user** `X-API-Key` to the
+> gateway; the gateway sends the **service** key (`X-Service-Key`) to the LLM
+> service. They must be configured as a matching pair (`LLM_SERVICE_API_KEY` on the
+> gateway == `SERVICE_API_KEY` on the LLM service).
 
 ### Apply DB migrations (chat history tables)
 Production runs with `CREATE_DB_TABLES=false`, so create the new tables on RDS:
@@ -156,15 +167,19 @@ cd voice-gateway_1 && alembic upgrade head
 # creates: conversations, chat_messages
 ```
 
-### Issue API keys
-Users sign up on the gateway (`POST /signup` → `/verify-otp`); each `users` row has
-an `api_key`. Hand that key to the client; it sends it as `X-API-Key`.
+### API keys — the single credential for all features
+Users sign up on the gateway (`POST /signup` → `/verify-otp`); each `users` row
+gets a unique `api_key`. Hand that one key to the client and it unlocks
+**everything** — chat, translate, voice, and history — sent as `X-API-Key`.
+The key is verified only at the gateway; the gateway→LLM→vLLM hops carry no key.
 
 ### Verify end-to-end (through the gateway)
 ```bash
 curl -X POST https://GATEWAY_HOST:8001/api/chat \
   -H "X-API-Key: <user_key>" -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"hi"}],"stream":false}'
+
+# no key → 401
 ```
 
 ---
@@ -294,6 +309,35 @@ Leave `false` for synchronous processing.
 - Health probes: gateway `GET /health` and `GET /ready` (checks DB); LLM service
   `GET /api/engine-health`.
 
+### Securing the model & internal services (prevent direct-IP bypass)
+The gateway API key only protects the gateway. If the model/engine IPs are public
+and keyless, anyone who finds `IP:port` bypasses the gateway and uses your GPU for
+free. Close every back door:
+
+1. **Firewall the ports — only the caller in front may connect (primary defense).**
+   - vLLM `:8007` ← only the LLM service IP.
+   - LLM service `:8008` ← only the gateway IP.
+   - STT `:8002` / TTS `:8000` ← only the LLM service IP.
+   - Cloud: security-group rules (source = the allowed SG/IP). Host: `ufw`:
+     ```bash
+     ufw default deny incoming
+     ufw allow from <CALLER_IP> to any port <PORT> proto tcp
+     ufw allow 22/tcp && ufw enable
+     ```
+2. **No public binding.** Put model + LLM + STT + TTS in a private VPC/subnet with
+   **no public IP**; bind vLLM to the private address (or `127.0.0.1` if co-located),
+   never `0.0.0.0` on a public NIC. Only the **gateway** is public (behind HTTPS).
+3. **Service key on the LLM service (defense in depth).** Set `SERVICE_API_KEY`
+   on the LLM service and the matching `LLM_SERVICE_API_KEY` on the gateway. The
+   gateway sends it as `X-Service-Key`; a direct hit on `:8008` without it gets
+   **401**. (Health check `/api/health` stays open for probes.)
+4. **Key vLLM too.** `vllm serve ... --api-key "$VLLM_SECRET"` and set
+   `VLLM_API_KEY=$VLLM_SECRET` in the LLM service `.env`. Keyless direct hits on
+   `:8007` then fail as well.
+5. **Result:** the gateway is the only public entrypoint; every hop behind it is
+   private + authenticated (user key → service key → vLLM key). Rotate all three
+   alongside other secrets.
+
 ### Secrets hygiene
 - Never commit `.env`. Rotate any key that's been shared (RDS password, AWS keys,
   JWT secret).
@@ -339,5 +383,12 @@ Leave `false` for synchronous processing.
 - [ ] SMTP configured (OTP emails send).
 - [ ] S3 (`USE_S3_STORAGE`) and/or SQS (`USE_ASYNC_QUEUE`) configured if used.
 - [ ] `ALLOWED_ORIGINS` = frontend origin(s); gateway behind HTTPS.
-- [ ] Only the gateway is public; LLM/vLLM/STT on a private network.
+
+**Lock down direct-IP bypass**
+- [ ] Only the gateway is public; model/LLM/STT/TTS in a private network, no public IP.
+- [ ] Firewall: vLLM `:8007` ← LLM-service IP only; `:8008` ← gateway IP only;
+      STT/TTS ← LLM-service IP only.
+- [ ] LLM service `SERVICE_API_KEY` == gateway `LLM_SERVICE_API_KEY` (matching pair).
+- [ ] Direct hit on `:8008` without `X-Service-Key` returns 401.
+- [ ] vLLM started with `--api-key`; `VLLM_API_KEY` set in the LLM service `.env`.
 - [ ] Secrets rotated; `.env` files not committed.

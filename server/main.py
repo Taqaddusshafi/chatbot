@@ -45,6 +45,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ── Service-key guard ─────────────────────────────────────────────────────────
+# When SERVICE_API_KEY is set, the model endpoints (/api/*, /v1/*) require a
+# matching X-Service-Key header. The gateway sends it; a direct hit on this
+# service's IP without the key is rejected. Empty key = open (dev/standalone).
+@app.middleware("http")
+async def service_key_guard(request, call_next):
+    if settings.service_api_key:
+        path = request.url.path
+        guarded = (path.startswith("/api/") or path.startswith("/v1/")) and path != "/api/health"
+        if guarded and request.headers.get("x-service-key") != settings.service_api_key:
+            return JSONResponse(status_code=401, content={"detail": "Invalid or missing service key"})
+    return await call_next(request)
+
 # Serve the frontend from the parent directory
 import os
 from pathlib import Path
