@@ -71,6 +71,48 @@ client → gateway /text-to-speech | /speech-to-text → SQS → voice-worker
 
 ---
 
+## API surface (all endpoints)
+
+### Gateway `:8001` (public)
+| Group | Endpoint | Auth |
+|---|---|---|
+| Account | `POST /signup` · `POST /verify-otp` · `POST /login` · `GET /profile` | OTP / JWT |
+| Model (proxy → LLM) | `POST /api/chat` · `POST /api/translate` · `POST /api/voice/tts` · `POST /api/voice/stt` · `GET /api/models` · `GET /api/engine-health` · `GET /api/health` | `X-API-Key` |
+| OpenAI surface | `GET /v1/models` · `POST /v1/chat/completions` | `X-API-Key` |
+| Chat history | `POST/GET /conversations` · `GET/PATCH/DELETE /conversations/{id}` · `POST /conversations/{id}/messages` | `X-API-Key` |
+| Native voice jobs | `POST /text-to-speech` · `POST /speech-to-text` · `GET /jobs/{id}` · `GET /voices` | `X-API-Key` |
+| Demo (optional) | `GET /demo` · `POST /demo/tts` · `POST /demo/stt` · `GET /demo/voices` | none (`DISABLE_DEMO=true` to remove) |
+| Ops | `GET /health` · `GET /ready` · `GET /docs` | none |
+
+### LLM service `:8008` (private; `X-Service-Key` when set)
+`POST /api/chat` (SSE/JSON) · `POST /api/translate` (`engine` llm\|api) ·
+`POST /api/voice/tts` (form → MP3) · `POST /api/voice/stt` (multipart → `{text}`) ·
+`GET /api/health` (open) · `GET /api/models` · `GET /api/engine-health` ·
+`GET /v1/models` · `POST /v1/chat/completions`
+
+### Engines (private)
+| Engine | Endpoint | Request → Response |
+|---|---|---|
+| STT `:8002` | `POST /v1/stt` · `GET /health` | multipart `file,language?` → `{text, language, words[]}` |
+| TTS `:8000` | `POST /v1/tts` · `GET /health` | JSON `{text, language, voice?, speech_id?}` → audio bytes |
+| vLLM `:8007` | `POST /v1/chat/completions` · `GET /v1/models` | OpenAI format |
+| Worker `:8006` | `GET /health` | TCP liveness |
+
+## Credentials & headers (per hop)
+
+| Hop | Credential | Header |
+|---|---|---|
+| client → gateway (model + history + jobs) | per-user API key | `X-API-Key` |
+| client → gateway (account: profile, etc.) | login JWT | `Authorization: Bearer` |
+| gateway → LLM service | shared service key | `X-Service-Key` |
+| LLM service → vLLM | model key | `Authorization: Bearer` |
+| gateway/worker → STT/TTS engines | none (network-isolated) | — |
+
+The gateway **strips** any client-sent `X-API-Key`/`X-Service-Key` before
+forwarding, and injects the authoritative `X-Service-Key` itself.
+
+---
+
 ## Final database schema (gateway Postgres — the single source of truth)
 
 8 tables. Created via `alembic upgrade head` (`schema.sql` mirrors them).
@@ -142,6 +184,23 @@ exception. A leaked user key is per-user, rate-limited, and revocable.
 2. LLM service + worker pods.
 3. Gateway pods (cheap, stateless).
 4. Postgres (read replica, bigger instance).
+
+---
+
+## Environment variables (per service)
+
+| Service | Key vars |
+|---|---|
+| **Gateway** | `DATABASE_URL` · `JWT_SECRET` · `ALLOWED_ORIGINS` · `LLM_SERVICE_URL` · `LLM_SERVICE_API_KEY` · `LLM_REQUIRE_API_KEY` · `LLM_RATE_LIMIT_ENABLED` · `DB_POOL_SIZE`/`DB_MAX_OVERFLOW`/`DB_POOL_RECYCLE` · `USE_S3_STORAGE`+`AWS_*` · `USE_ASYNC_QUEUE`+`AWS_SQS_*` · `SMTP_*` · `CREATE_DB_TABLES=false` · `ENVIRONMENT=production` |
+| **LLM service** | `VLLM_BASE_URL` · `VLLM_API_KEY` · `VLLM_MODEL` · `VLLM_TIMEOUT` · `SERVICE_API_KEY` · `STT_ENGINE_URL`/`STT_ENGINE_PATH` · `TTS_ENGINE_URL` · `ENGINE_TIMEOUT` · `ALLOWED_ORIGINS` · `PORT=8008` |
+| **Voice worker** | `DATABASE_URL` (same as gateway) · `AWS_*` (S3) · `AWS_SQS_TTS_QUEUE_URL`/`AWS_SQS_STT_QUEUE_URL` · `TTS_ENGINE_URL` · `STT_ENGINE_URL` · `WORKER_MAX_CONCURRENT` · `SQS_VISIBILITY_TIMEOUT`/`SQS_WAIT_TIME_SECONDS`/`SQS_MAX_RECEIVE_COUNT` |
+| **STT engine** | `PORT=8002` · `MAX_FILE_SIZE_BYTES` · Whisper model/compute settings |
+| **TTS engine** | `PORT=8000` · `MAX_TEXT_CHARS` · model/dtype settings |
+| **vLLM** | `--api-key` (= LLM service's `VLLM_API_KEY`) · `HF_TOKEN` |
+
+**Matched pairs (must be equal):** `LLM_SERVICE_API_KEY` (gateway) = `SERVICE_API_KEY`
+(LLM); `VLLM_API_KEY` (LLM) = vLLM `--api-key`; `DATABASE_URL` identical on gateway
+and worker; `AWS_SQS_*`/`AWS_S3_*` shared by gateway and worker.
 
 ---
 
