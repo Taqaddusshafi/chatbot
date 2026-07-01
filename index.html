@@ -83,6 +83,7 @@
         </div>
         <div class="chat-header__actions">
           <button class="btn-icon btn-live" id="btnInterpreter" onclick="openInterpreter()" title="Two-language conversation interpreter"><span class="btn-live__icon">🗣️</span><span class="btn-live__text">Interpret</span></button>
+          <button class="btn-icon btn-live btn-live--accent" id="btnLiveTranslate" onclick="openLiveTranslate()" title="Real-time live translation"><span class="btn-live__icon">⚡</span><span class="btn-live__text">Live Translate</span></button>
           <button class="btn-icon btn-live" id="btnLive" onclick="openLiveVoice()" title="Live voice conversation"><span class="btn-live__icon">🎤</span><span class="btn-live__text">Live</span></button>
           <button class="btn-icon" id="btnClearChat" onclick="clearCurrentChat()" title="Clear chat">🗑️</button>
           <button class="btn-icon" id="btnSettings" onclick="toggleSettings()" title="Settings">⚙️</button>
@@ -258,6 +259,108 @@
       </div>
 
       <button class="live-stop" onclick="closeInterpreter()">End Conversation</button>
+    </div>
+  </div>
+
+  <!-- ═══ Live Translation Panel ═══ -->
+  <div class="live-overlay" id="liveTranslateOverlay">
+    <div class="live-panel lt-panel">
+      <button class="live-close" onclick="closeLiveTranslate()" title="Close">✕</button>
+      <div class="lt-title">⚡ Live Translation</div>
+
+      <div class="lt-langs">
+        <select id="ltLangSource" onchange="ltSyncLangs()">
+          <optgroup label="Auto">
+            <option value="auto" selected>🔍 Auto-detect</option>
+          </optgroup>
+          <optgroup label="Indian">
+            <option value="hi">Hindi — हिन्दी</option>
+            <option value="bn">Bengali — বাংলা</option>
+            <option value="ta">Tamil — தமிழ்</option>
+            <option value="te">Telugu — తెలుగు</option>
+            <option value="mr">Marathi — मराठी</option>
+            <option value="gu">Gujarati — ગુજરાતી</option>
+            <option value="kn">Kannada — ಕನ್ನಡ</option>
+            <option value="ml">Malayalam — മലയാളം</option>
+            <option value="pa">Punjabi — ਪੰਜਾਬੀ</option>
+            <option value="ur">Urdu — اردو</option>
+          </optgroup>
+          <optgroup label="World">
+            <option value="en">English</option>
+            <option value="zh">Chinese — 中文</option>
+            <option value="es">Spanish — Español</option>
+            <option value="ar">Arabic — العربية</option>
+            <option value="fr">French — Français</option>
+            <option value="pt">Portuguese — Português</option>
+            <option value="ru">Russian — Русский</option>
+            <option value="de">German — Deutsch</option>
+            <option value="ja">Japanese — 日本語</option>
+            <option value="ko">Korean — 한국어</option>
+            <option value="it">Italian — Italiano</option>
+            <option value="tr">Turkish — Türkçe</option>
+          </optgroup>
+        </select>
+        <button class="interp-swap" onclick="ltSwapLangs()" title="Swap languages">⇄</button>
+        <select id="ltLangTarget" onchange="ltSyncLangs()">
+          <optgroup label="Indian">
+            <option value="hi" selected>Hindi — हिन्दी</option>
+            <option value="bn">Bengali — বাংলা</option>
+            <option value="ta">Tamil — தமிழ்</option>
+            <option value="te">Telugu — తెలుగు</option>
+            <option value="mr">Marathi — मराठी</option>
+            <option value="gu">Gujarati — ગુજરાতી</option>
+            <option value="kn">Kannada — ಕನ್ನಡ</option>
+            <option value="ml">Malayalam — മലയാളം</option>
+            <option value="pa">Punjabi — ਪੰਜਾਬੀ</option>
+            <option value="ur">Urdu — اردو</option>
+          </optgroup>
+          <optgroup label="World">
+            <option value="en">English</option>
+            <option value="zh">Chinese — 中文</option>
+            <option value="es">Spanish — Español</option>
+            <option value="ar">Arabic — العربية</option>
+            <option value="fr">French — Français</option>
+            <option value="pt">Portuguese — Português</option>
+            <option value="ru">Russian — Русский</option>
+            <option value="de">German — Deutsch</option>
+            <option value="ja">Japanese — 日本語</option>
+            <option value="ko">Korean — 한국어</option>
+            <option value="it">Italian — Italiano</option>
+            <option value="tr">Turkish — Türkçe</option>
+          </optgroup>
+        </select>
+      </div>
+
+      <!-- Source input -->
+      <div class="lt-source">
+        <label class="lt-label">🗣️ Original</label>
+        <div class="lt-input-wrap">
+          <textarea id="ltInput" class="lt-textarea" placeholder="Start typing or tap 🎙️ to speak…" rows="3" oninput="ltOnInput()"></textarea>
+          <button class="lt-mic" id="ltMicBtn" onclick="ltToggleMic()" title="Voice input">🎙️</button>
+        </div>
+        <div class="lt-interim" id="ltInterim"></div>
+      </div>
+
+      <!-- Divider -->
+      <div class="lt-divider">
+        <div class="lt-divider__line"></div>
+        <div class="lt-divider__icon" id="ltSpinner">⚡</div>
+        <div class="lt-divider__line"></div>
+      </div>
+
+      <!-- Translation output -->
+      <div class="lt-output">
+        <label class="lt-label">🌐 Translation</label>
+        <div class="lt-result" id="ltResult">
+          <span class="lt-placeholder">Translation will appear here in real-time…</span>
+        </div>
+        <div class="lt-output-actions">
+          <button class="lt-action-btn" id="ltSpeakBtn" onclick="ltSpeak()" title="Listen to translation" disabled>🔊 Listen</button>
+          <button class="lt-action-btn" id="ltCopyBtn" onclick="ltCopy()" title="Copy translation" disabled>📋 Copy</button>
+        </div>
+      </div>
+
+      <button class="live-stop" onclick="closeLiveTranslate()">Close</button>
     </div>
   </div>
 

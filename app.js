@@ -2097,3 +2097,441 @@ function interpStopAudio() {
     r();
   }
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  Live Translation Module
+//  Real-time as-you-type & as-you-speak translation with typewriter output
+// ══════════════════════════════════════════════════════════════════════════════
+
+const LT = {
+  active: false,
+  sourceLang: 'auto',
+  targetLang: 'hi',
+  debounceTimer: null,
+  debounceMs: 400,
+  gen: 0,                  // generation counter — ignore stale responses
+  lastTranslatedText: '',  // the text we last translated (skip re-sends)
+  lastResult: '',          // final translation string
+  recog: null,             // SpeechRecognition instance
+  recording: false,
+  audio: null,             // currently playing TTS audio
+  audioResolve: null,
+  speaking: false,
+};
+
+// RTL language codes
+const RTL_LANGS = new Set(['ar', 'fa', 'he', 'ur']);
+
+function openLiveTranslate() {
+  const overlay = document.getElementById('liveTranslateOverlay');
+  overlay.classList.add('open');
+  LT.active = true;
+  LT.gen++;
+  LT.lastTranslatedText = '';
+  LT.lastResult = '';
+
+  // Reset UI
+  const input = document.getElementById('ltInput');
+  const result = document.getElementById('ltResult');
+  const interim = document.getElementById('ltInterim');
+  input.value = '';
+  result.innerHTML = '<span class="lt-placeholder">Translation will appear here in real-time…</span>';
+  result.classList.remove('typing');
+  result.removeAttribute('dir');
+  interim.textContent = '';
+  document.getElementById('ltSpeakBtn').disabled = true;
+  document.getElementById('ltCopyBtn').disabled = true;
+  document.getElementById('ltSpinner').classList.remove('translating');
+
+  // Warm speech synthesis voice list
+  if (window.speechSynthesis) window.speechSynthesis.getVoices();
+
+  // Focus the input after overlay transition
+  setTimeout(() => input.focus(), 200);
+}
+
+function closeLiveTranslate() {
+  LT.active = false;
+  LT.gen++;
+  ltStopMic();
+  ltStopAudio();
+  clearTimeout(LT.debounceTimer);
+  document.getElementById('liveTranslateOverlay').classList.remove('open');
+}
+
+function ltSyncLangs() {
+  LT.sourceLang = document.getElementById('ltLangSource').value;
+  LT.targetLang = document.getElementById('ltLangTarget').value;
+
+  // Re-translate current text when language changes
+  const text = document.getElementById('ltInput').value.trim();
+  if (text) {
+    LT.lastTranslatedText = '';  // force re-translate
+    ltScheduleTranslation();
+  }
+}
+
+function ltSwapLangs() {
+  const srcSel = document.getElementById('ltLangSource');
+  const tgtSel = document.getElementById('ltLangTarget');
+
+  // If source is 'auto', move old target to source and pick something sensible
+  if (srcSel.value === 'auto') {
+    srcSel.value = tgtSel.value;
+    tgtSel.value = 'en';
+  } else {
+    const tmp = srcSel.value;
+    srcSel.value = tgtSel.value;
+    tgtSel.value = tmp;
+  }
+  ltSyncLangs();
+}
+
+// ── Debounced input → translate ───────────────────────────────────────────────
+function ltOnInput() {
+  ltScheduleTranslation();
+}
+
+function ltScheduleTranslation() {
+  clearTimeout(LT.debounceTimer);
+  const text = document.getElementById('ltInput').value.trim();
+
+  if (!text) {
+    // Clear output immediately when input is cleared
+    const result = document.getElementById('ltResult');
+    result.innerHTML = '<span class="lt-placeholder">Translation will appear here in real-time…</span>';
+    result.classList.remove('typing');
+    result.removeAttribute('dir');
+    document.getElementById('ltSpeakBtn').disabled = true;
+    document.getElementById('ltCopyBtn').disabled = true;
+    document.getElementById('ltSpinner').classList.remove('translating');
+    LT.lastTranslatedText = '';
+    LT.lastResult = '';
+    return;
+  }
+
+  if (text === LT.lastTranslatedText) return; // no change
+
+  LT.debounceTimer = setTimeout(() => ltDoTranslate(text), LT.debounceMs);
+}
+
+async function ltDoTranslate(text) {
+  if (!LT.active) return;
+  const myGen = ++LT.gen;
+
+  // Show spinner
+  const spinner = document.getElementById('ltSpinner');
+  const result = document.getElementById('ltResult');
+  spinner.classList.add('translating');
+  result.classList.add('typing');
+
+  try {
+    const targetLang = LT.targetLang;
+    const resp = await fetch(apiUrl('/translate'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        target_lang: targetLang,
+        engine: translateEngine,
+      }),
+    });
+
+    if (myGen !== LT.gen) return; // stale
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+      throw new Error(err.detail || `HTTP ${resp.status}`);
+    }
+
+    const data = await resp.json();
+    if (myGen !== LT.gen) return; // stale
+
+    const translation = (data.translation || '').trim();
+    LT.lastTranslatedText = text;
+    LT.lastResult = translation;
+
+    // Set RTL if target is an RTL language
+    const effectiveTarget = data.target_lang || targetLang;
+    if (RTL_LANGS.has(effectiveTarget)) {
+      result.setAttribute('dir', 'rtl');
+    } else {
+      result.removeAttribute('dir');
+    }
+
+    // Typewriter render
+    ltTypewriterRender(translation, myGen);
+
+    // Enable action buttons
+    document.getElementById('ltSpeakBtn').disabled = false;
+    document.getElementById('ltCopyBtn').disabled = false;
+
+  } catch (err) {
+    if (myGen !== LT.gen) return;
+    result.innerHTML = `<span style="color:var(--error)">⚠️ ${escapeHtml(err.message)}</span>`;
+    result.classList.remove('typing');
+  } finally {
+    spinner.classList.remove('translating');
+  }
+}
+
+// ── Typewriter character-by-character rendering ───────────────────────────────
+function ltTypewriterRender(text, gen) {
+  const result = document.getElementById('ltResult');
+  result.innerHTML = '';
+  result.classList.add('typing');
+
+  // Render characters with staggered delay
+  const chars = [...text]; // handle multi-byte/emoji correctly
+  let i = 0;
+  const charDelay = Math.max(8, Math.min(35, 1200 / chars.length)); // adaptive speed
+
+  function renderNext() {
+    if (gen !== LT.gen || i >= chars.length) {
+      result.classList.remove('typing');
+      return;
+    }
+    const span = document.createElement('span');
+    span.className = 'lt-char';
+    span.style.animationDelay = '0s';
+    span.textContent = chars[i];
+    result.appendChild(span);
+    i++;
+
+    // Auto-scroll the result area
+    result.scrollTop = result.scrollHeight;
+
+    if (i < chars.length) {
+      setTimeout(renderNext, charDelay);
+    } else {
+      result.classList.remove('typing');
+    }
+  }
+
+  renderNext();
+}
+
+// ── Voice input via Web Speech API ────────────────────────────────────────────
+function ltToggleMic() {
+  if (LT.recording) {
+    ltStopMic();
+  } else {
+    ltStartMic();
+  }
+}
+
+function ltStartMic() {
+  if (!liveSupported()) {
+    alert('Voice input requires Chrome, Edge, or Safari (Web Speech API).');
+    return;
+  }
+
+  const SpeechRecog = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const recog = new SpeechRecog();
+  recog.continuous = true;
+  recog.interimResults = true;
+
+  // Set recognition language to match source selector (auto → English fallback)
+  const srcLang = LT.sourceLang === 'auto' ? 'en-US' : ltLangToLocale(LT.sourceLang);
+  recog.lang = srcLang;
+
+  const input = document.getElementById('ltInput');
+  const interim = document.getElementById('ltInterim');
+  const micBtn = document.getElementById('ltMicBtn');
+
+  // Capture whatever is already in the textarea so we append to it
+  let baseText = input.value;
+
+  recog.onresult = (e) => {
+    let interimText = '';
+    let finalText = '';
+
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const transcript = e.results[i][0].transcript;
+      if (e.results[i].isFinal) {
+        finalText += transcript;
+      } else {
+        interimText += transcript;
+      }
+    }
+
+    if (finalText) {
+      baseText += (baseText ? ' ' : '') + finalText.trim();
+      input.value = baseText;
+      interim.textContent = '';
+      ltOnInput(); // trigger translation
+    }
+
+    if (interimText) {
+      interim.textContent = '🎤 ' + interimText;
+    }
+  };
+
+  recog.onerror = (e) => {
+    if (e.error === 'no-speech' || e.error === 'aborted') return;
+    console.warn('LT speech error:', e.error);
+    ltStopMic();
+  };
+
+  recog.onend = () => {
+    // Continuous mode sometimes stops by itself — restart if still recording
+    if (LT.recording && LT.active) {
+      try { recog.start(); } catch {}
+    }
+  };
+
+  try {
+    recog.start();
+  } catch (err) {
+    console.warn('LT mic start failed:', err);
+    return;
+  }
+
+  LT.recog = recog;
+  LT.recording = true;
+  micBtn.classList.add('recording');
+}
+
+function ltStopMic() {
+  if (LT.recog) {
+    LT.recording = false; // set BEFORE stop to prevent auto-restart in onend
+    try { LT.recog.stop(); } catch {}
+    LT.recog = null;
+  }
+  LT.recording = false;
+  const micBtn = document.getElementById('ltMicBtn');
+  if (micBtn) micBtn.classList.remove('recording');
+  const interim = document.getElementById('ltInterim');
+  if (interim) interim.textContent = '';
+}
+
+// Map short lang codes to BCP-47 locale for speech recognition
+function ltLangToLocale(code) {
+  const map = {
+    en: 'en-US', hi: 'hi-IN', bn: 'bn-IN', ta: 'ta-IN', te: 'te-IN',
+    mr: 'mr-IN', gu: 'gu-IN', kn: 'kn-IN', ml: 'ml-IN', pa: 'pa-IN',
+    ur: 'ur-PK', ar: 'ar-SA', zh: 'zh-CN', es: 'es-ES', fr: 'fr-FR',
+    pt: 'pt-BR', ru: 'ru-RU', de: 'de-DE', ja: 'ja-JP', ko: 'ko-KR',
+    it: 'it-IT', tr: 'tr-TR',
+  };
+  return map[code] || code;
+}
+
+// ── TTS — speak the translation aloud ─────────────────────────────────────────
+async function ltSpeak() {
+  if (LT.speaking) {
+    ltStopAudio();
+    return;
+  }
+  const text = LT.lastResult;
+  if (!text) return;
+
+  const speakBtn = document.getElementById('ltSpeakBtn');
+  const clean = liveCleanForSpeech(text);
+  if (!clean) return;
+
+  LT.speaking = true;
+  speakBtn.classList.add('speaking');
+  speakBtn.textContent = '⏹ Stop';
+
+  try {
+    // Try server TTS first
+    const fd = new FormData();
+    fd.append('text', clean);
+    fd.append('language', LT.targetLang);
+    const resp = await fetch(apiUrl('/voice/tts'), { method: 'POST', body: fd });
+    if (!resp.ok) throw new Error(`TTS ${resp.status}`);
+    const blob = await resp.blob();
+    if (blob.size === 0) throw new Error('empty audio');
+    await ltPlayBlob(blob);
+  } catch {
+    // Fallback to browser speech synthesis
+    await ltBrowserSpeak(clean, LT.targetLang);
+  }
+
+  LT.speaking = false;
+  speakBtn.classList.remove('speaking');
+  speakBtn.textContent = '🔊 Listen';
+}
+
+function ltPlayBlob(blob) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    LT.audio = audio;
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      URL.revokeObjectURL(url);
+      if (LT.audio === audio) LT.audio = null;
+      if (LT.audioResolve === done) LT.audioResolve = null;
+      resolve();
+    };
+    LT.audioResolve = done;
+    audio.onended = done;
+    audio.onerror = done;
+    audio.play().catch(done);
+  });
+}
+
+function ltBrowserSpeak(text, langCode) {
+  return new Promise((resolve) => {
+    const synth = window.speechSynthesis;
+    if (!synth) { resolve(); return; }
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      if (LT.audioResolve === done) LT.audioResolve = null;
+      resolve();
+    };
+    LT.audioResolve = done;
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = ltLangToLocale(langCode);
+    u.rate = 1.0;
+    const voice = synth.getVoices().find(v => v.lang && v.lang.toLowerCase().startsWith(langCode));
+    if (voice) u.voice = voice;
+    u.onend = done;
+    u.onerror = done;
+    try { synth.cancel(); } catch {}
+    synth.speak(u);
+  });
+}
+
+function ltStopAudio() {
+  if (LT.audio) {
+    try { LT.audio.pause(); } catch {}
+    LT.audio = null;
+  }
+  if (window.speechSynthesis && window.speechSynthesis.speaking) {
+    try { window.speechSynthesis.cancel(); } catch {}
+  }
+  if (LT.audioResolve) {
+    const r = LT.audioResolve;
+    LT.audioResolve = null;
+    r();
+  }
+  LT.speaking = false;
+  const speakBtn = document.getElementById('ltSpeakBtn');
+  if (speakBtn) {
+    speakBtn.classList.remove('speaking');
+    speakBtn.textContent = '🔊 Listen';
+  }
+}
+
+// ── Copy translation to clipboard ─────────────────────────────────────────────
+async function ltCopy() {
+  const text = LT.lastResult;
+  if (!text) return;
+  const btn = document.getElementById('ltCopyBtn');
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = '✅ Copied!';
+    setTimeout(() => { btn.textContent = '📋 Copy'; }, 1500);
+  } catch {
+    btn.textContent = '❌ Failed';
+    setTimeout(() => { btn.textContent = '📋 Copy'; }, 1500);
+  }
+}
+
