@@ -2201,7 +2201,6 @@ function ltScheduleTranslation() {
     // Clear output immediately when input is cleared
     const result = document.getElementById('ltResult');
     result.innerHTML = '<span class="lt-placeholder">Translation will appear here in real-time…</span>';
-    result.classList.remove('typing');
     result.removeAttribute('dir');
     document.getElementById('ltSpeakBtn').disabled = true;
     document.getElementById('ltCopyBtn').disabled = true;
@@ -2213,59 +2212,56 @@ function ltScheduleTranslation() {
 
   if (text === LT.lastTranslatedText) return; // no change
 
-  LT.debounceTimer = setTimeout(() => ltDoTranslate(text), LT.debounceMs);
+  // Ultra-fast: 60ms debounce, fires almost every keystroke
+  LT.debounceTimer = setTimeout(() => ltDoTranslate(text), 60);
 }
 
 async function ltDoTranslate(text) {
   if (!LT.active) return;
   const myGen = ++LT.gen;
 
-  // Abort any in-flight request so we don't queue behind a slow one
+  // Abort any in-flight request immediately
   if (LT.abortCtrl) { try { LT.abortCtrl.abort(); } catch {} }
   LT.abortCtrl = new AbortController();
 
-  // Show spinner
   const spinner = document.getElementById('ltSpinner');
   const result = document.getElementById('ltResult');
   spinner.classList.add('translating');
 
   try {
     const targetLang = LT.targetLang;
-    // Always use the fast Google Translate API for live translation
-    const resp = await fetch(apiUrl('/translate'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text,
-        target_lang: targetLang,
-        engine: 'api',
-      }),
+    const srcLang = LT.sourceLang === 'auto' ? 'auto' : LT.sourceLang;
+
+    // ── Call Google Translate DIRECTLY from the browser — no backend round-trip ──
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(srcLang)}&tl=${encodeURIComponent(targetLang)}&dt=t&q=${encodeURIComponent(text)}`;
+    const resp = await fetch(url, {
       signal: LT.abortCtrl.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0' },
     });
 
     if (myGen !== LT.gen) return; // stale
 
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-      throw new Error(err.detail || `HTTP ${resp.status}`);
-    }
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
     const data = await resp.json();
     if (myGen !== LT.gen) return; // stale
 
-    const translation = (data.translation || '').trim();
+    // Parse Google's response: [[[translated, original, ...], ...], ..., detectedLang]
+    const segments = data[0] || [];
+    const translation = segments.map(seg => (seg && seg[0]) || '').join('').trim();
+    const detectedLang = data[2] || srcLang;
+
     LT.lastTranslatedText = text;
     LT.lastResult = translation;
 
-    // Set RTL if target is an RTL language
-    const effectiveTarget = data.target_lang || targetLang;
-    if (RTL_LANGS.has(effectiveTarget)) {
+    // Set RTL for Arabic/Urdu/Hebrew/Persian
+    if (RTL_LANGS.has(targetLang)) {
       result.setAttribute('dir', 'rtl');
     } else {
       result.removeAttribute('dir');
     }
 
-    // Instant render with a quick fade-in (no slow typewriter)
+    // Instant render
     ltInstantRender(translation);
 
     // Enable action buttons
@@ -2275,6 +2271,33 @@ async function ltDoTranslate(text) {
   } catch (err) {
     if (err.name === 'AbortError') return; // we aborted it ourselves
     if (myGen !== LT.gen) return;
+
+    // Fallback: try via backend if direct Google call fails (e.g. CORS)
+    try {
+      const resp2 = await fetch(apiUrl('/translate'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, target_lang: LT.targetLang, engine: 'api' }),
+        signal: LT.abortCtrl.signal,
+      });
+      if (myGen !== LT.gen) return;
+      if (resp2.ok) {
+        const d = await resp2.json();
+        if (myGen !== LT.gen) return;
+        const t = (d.translation || '').trim();
+        LT.lastTranslatedText = text;
+        LT.lastResult = t;
+        if (RTL_LANGS.has(LT.targetLang)) result.setAttribute('dir', 'rtl');
+        else result.removeAttribute('dir');
+        ltInstantRender(t);
+        document.getElementById('ltSpeakBtn').disabled = false;
+        document.getElementById('ltCopyBtn').disabled = false;
+        return;
+      }
+    } catch (e2) {
+      if (e2.name === 'AbortError') return;
+    }
+
     result.innerHTML = `<span style="color:var(--error)">⚠️ ${escapeHtml(err.message)}</span>`;
   } finally {
     if (myGen === LT.gen) spinner.classList.remove('translating');
