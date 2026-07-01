@@ -2228,77 +2228,95 @@ async function ltDoTranslate(text) {
   const result = document.getElementById('ltResult');
   spinner.classList.add('translating');
 
+  const targetLang = LT.targetLang;
+  const srcLang = LT.sourceLang === 'auto' ? 'auto' : LT.sourceLang;
+
+  // ── Strategy 1: MyMemory Translation API (free, CORS-friendly, reliable) ──
   try {
-    const targetLang = LT.targetLang;
-    const srcLang = LT.sourceLang === 'auto' ? 'auto' : LT.sourceLang;
+    // MyMemory wants "en|hi" style langpair; "autodetect" if source unknown
+    const srcCode = srcLang === 'auto' ? 'autodetect' : srcLang;
+    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${encodeURIComponent(srcCode + '|' + targetLang)}`;
+    const resp = await fetch(url, { signal: LT.abortCtrl.signal });
 
-    // ── Call Google Translate DIRECTLY from the browser — no backend round-trip ──
-    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(srcLang)}&tl=${encodeURIComponent(targetLang)}&dt=t&q=${encodeURIComponent(text)}`;
-    const resp = await fetch(url, {
-      signal: LT.abortCtrl.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-    });
-
-    if (myGen !== LT.gen) return; // stale
-
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-    const data = await resp.json();
-    if (myGen !== LT.gen) return; // stale
-
-    // Parse Google's response: [[[translated, original, ...], ...], ..., detectedLang]
-    const segments = data[0] || [];
-    const translation = segments.map(seg => (seg && seg[0]) || '').join('').trim();
-    const detectedLang = data[2] || srcLang;
-
-    LT.lastTranslatedText = text;
-    LT.lastResult = translation;
-
-    // Set RTL for Arabic/Urdu/Hebrew/Persian
-    if (RTL_LANGS.has(targetLang)) {
-      result.setAttribute('dir', 'rtl');
-    } else {
-      result.removeAttribute('dir');
-    }
-
-    // Instant render
-    ltInstantRender(translation);
-
-    // Enable action buttons
-    document.getElementById('ltSpeakBtn').disabled = false;
-    document.getElementById('ltCopyBtn').disabled = false;
-
-  } catch (err) {
-    if (err.name === 'AbortError') return; // we aborted it ourselves
     if (myGen !== LT.gen) return;
-
-    // Fallback: try via backend if direct Google call fails (e.g. CORS)
-    try {
-      const resp2 = await fetch(apiUrl('/translate'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, target_lang: LT.targetLang, engine: 'api' }),
-        signal: LT.abortCtrl.signal,
-      });
+    if (resp.ok) {
+      const data = await resp.json();
       if (myGen !== LT.gen) return;
-      if (resp2.ok) {
-        const d = await resp2.json();
-        if (myGen !== LT.gen) return;
-        const t = (d.translation || '').trim();
+
+      const translation = (data.responseData?.translatedText || '').trim();
+      // MyMemory returns the original text uppercased if it can't translate — detect that
+      if (translation && translation.toUpperCase() !== text.toUpperCase()) {
         LT.lastTranslatedText = text;
-        LT.lastResult = t;
-        if (RTL_LANGS.has(LT.targetLang)) result.setAttribute('dir', 'rtl');
+        LT.lastResult = translation;
+        if (RTL_LANGS.has(targetLang)) result.setAttribute('dir', 'rtl');
         else result.removeAttribute('dir');
-        ltInstantRender(t);
+        ltInstantRender(translation);
         document.getElementById('ltSpeakBtn').disabled = false;
         document.getElementById('ltCopyBtn').disabled = false;
+        spinner.classList.remove('translating');
         return;
       }
-    } catch (e2) {
-      if (e2.name === 'AbortError') return;
     }
+  } catch (e1) {
+    if (e1.name === 'AbortError') return;
+    if (myGen !== LT.gen) return;
+  }
 
-    result.innerHTML = `<span style="color:var(--error)">⚠️ ${escapeHtml(err.message)}</span>`;
+  // ── Strategy 2: Backend /api/translate (slower but always works) ──
+  try {
+    const resp2 = await fetch(apiUrl('/translate'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, target_lang: targetLang, engine: 'api' }),
+      signal: LT.abortCtrl.signal,
+    });
+    if (myGen !== LT.gen) return;
+    if (resp2.ok) {
+      const d = await resp2.json();
+      if (myGen !== LT.gen) return;
+      const t = (d.translation || '').trim();
+      LT.lastTranslatedText = text;
+      LT.lastResult = t;
+      if (RTL_LANGS.has(targetLang)) result.setAttribute('dir', 'rtl');
+      else result.removeAttribute('dir');
+      ltInstantRender(t);
+      document.getElementById('ltSpeakBtn').disabled = false;
+      document.getElementById('ltCopyBtn').disabled = false;
+      spinner.classList.remove('translating');
+      return;
+    }
+  } catch (e2) {
+    if (e2.name === 'AbortError') return;
+    if (myGen !== LT.gen) return;
+  }
+
+  // ── Strategy 3: Backend LLM fallback ──
+  try {
+    const resp3 = await fetch(apiUrl('/translate'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, target_lang: targetLang, engine: 'llm' }),
+      signal: LT.abortCtrl.signal,
+    });
+    if (myGen !== LT.gen) return;
+    if (resp3.ok) {
+      const d = await resp3.json();
+      if (myGen !== LT.gen) return;
+      const t = (d.translation || '').trim();
+      LT.lastTranslatedText = text;
+      LT.lastResult = t;
+      if (RTL_LANGS.has(targetLang)) result.setAttribute('dir', 'rtl');
+      else result.removeAttribute('dir');
+      ltInstantRender(t);
+      document.getElementById('ltSpeakBtn').disabled = false;
+      document.getElementById('ltCopyBtn').disabled = false;
+    } else {
+      result.innerHTML = '<span style="color:var(--error)">⚠️ Translation service unavailable</span>';
+    }
+  } catch (e3) {
+    if (e3.name === 'AbortError') return;
+    if (myGen !== LT.gen) return;
+    result.innerHTML = '<span style="color:var(--error)">⚠️ Translation failed — check your connection</span>';
   } finally {
     if (myGen === LT.gen) spinner.classList.remove('translating');
   }
