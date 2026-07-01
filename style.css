@@ -1767,26 +1767,13 @@ body::before {
   font-style: italic;
 }
 
-/* Typewriter cursor blink on the translation text */
-.lt-result.typing::after {
-  content: '▊';
-  display: inline;
-  color: var(--accent-primary);
-  animation: ltCursorBlink 0.6s step-end infinite;
-  margin-left: 1px;
+/* Quick fade-in when translation text updates */
+.lt-result.lt-fade {
+  animation: ltFadeIn 0.15s ease-out;
 }
-@keyframes ltCursorBlink {
-  50% { opacity: 0; }
-}
-
-/* Fade-in animation for the translation text */
-.lt-result .lt-char {
-  display: inline;
-  opacity: 0;
-  animation: ltCharIn 0.12s ease-out forwards;
-}
-@keyframes ltCharIn {
-  to { opacity: 1; }
+@keyframes ltFadeIn {
+  from { opacity: 0.3; transform: translateY(2px); }
+  to   { opacity: 1;   transform: translateY(0); }
 }
 
 /* Action buttons row */

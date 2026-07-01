@@ -2108,8 +2108,9 @@ const LT = {
   sourceLang: 'auto',
   targetLang: 'hi',
   debounceTimer: null,
-  debounceMs: 400,
+  debounceMs: 120,         // very fast — near-instant as you type
   gen: 0,                  // generation counter — ignore stale responses
+  abortCtrl: null,         // AbortController for in-flight fetch
   lastTranslatedText: '',  // the text we last translated (skip re-sends)
   lastResult: '',          // final translation string
   recog: null,             // SpeechRecognition instance
@@ -2219,22 +2220,27 @@ async function ltDoTranslate(text) {
   if (!LT.active) return;
   const myGen = ++LT.gen;
 
+  // Abort any in-flight request so we don't queue behind a slow one
+  if (LT.abortCtrl) { try { LT.abortCtrl.abort(); } catch {} }
+  LT.abortCtrl = new AbortController();
+
   // Show spinner
   const spinner = document.getElementById('ltSpinner');
   const result = document.getElementById('ltResult');
   spinner.classList.add('translating');
-  result.classList.add('typing');
 
   try {
     const targetLang = LT.targetLang;
+    // Always use the fast Google Translate API for live translation
     const resp = await fetch(apiUrl('/translate'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text,
         target_lang: targetLang,
-        engine: translateEngine,
+        engine: 'api',
       }),
+      signal: LT.abortCtrl.signal,
     });
 
     if (myGen !== LT.gen) return; // stale
@@ -2259,56 +2265,32 @@ async function ltDoTranslate(text) {
       result.removeAttribute('dir');
     }
 
-    // Typewriter render
-    ltTypewriterRender(translation, myGen);
+    // Instant render with a quick fade-in (no slow typewriter)
+    ltInstantRender(translation);
 
     // Enable action buttons
     document.getElementById('ltSpeakBtn').disabled = false;
     document.getElementById('ltCopyBtn').disabled = false;
 
   } catch (err) {
+    if (err.name === 'AbortError') return; // we aborted it ourselves
     if (myGen !== LT.gen) return;
     result.innerHTML = `<span style="color:var(--error)">⚠️ ${escapeHtml(err.message)}</span>`;
-    result.classList.remove('typing');
   } finally {
-    spinner.classList.remove('translating');
+    if (myGen === LT.gen) spinner.classList.remove('translating');
   }
 }
 
-// ── Typewriter character-by-character rendering ───────────────────────────────
-function ltTypewriterRender(text, gen) {
+// ── Instant render with fade-in animation ─────────────────────────────────────
+function ltInstantRender(text) {
   const result = document.getElementById('ltResult');
-  result.innerHTML = '';
-  result.classList.add('typing');
-
-  // Render characters with staggered delay
-  const chars = [...text]; // handle multi-byte/emoji correctly
-  let i = 0;
-  const charDelay = Math.max(8, Math.min(35, 1200 / chars.length)); // adaptive speed
-
-  function renderNext() {
-    if (gen !== LT.gen || i >= chars.length) {
-      result.classList.remove('typing');
-      return;
-    }
-    const span = document.createElement('span');
-    span.className = 'lt-char';
-    span.style.animationDelay = '0s';
-    span.textContent = chars[i];
-    result.appendChild(span);
-    i++;
-
-    // Auto-scroll the result area
-    result.scrollTop = result.scrollHeight;
-
-    if (i < chars.length) {
-      setTimeout(renderNext, charDelay);
-    } else {
-      result.classList.remove('typing');
-    }
-  }
-
-  renderNext();
+  result.textContent = text;
+  // Trigger a quick fade-in via CSS class toggle
+  result.classList.remove('lt-fade');
+  // Force reflow so the re-add triggers the animation
+  void result.offsetWidth;
+  result.classList.add('lt-fade');
+  result.scrollTop = result.scrollHeight;
 }
 
 // ── Voice input via Web Speech API ────────────────────────────────────────────
