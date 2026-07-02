@@ -2118,10 +2118,126 @@ const LT = {
   audio: null,             // currently playing TTS audio
   audioResolve: null,
   speaking: false,
+  ws: null,                // WebSocket connection
+  wsConnecting: false,     // WS connecting status flag
+  wsFailed: false,         // WS persistent failure status flag
 };
 
 // RTL language codes
 const RTL_LANGS = new Set(['ar', 'fa', 'he', 'ur']);
+
+function wsUrl(path) {
+  const base = config.apiUrl || '';
+  if (base) {
+    return base.replace(/^http/, 'ws') + '/api' + path;
+  }
+  const loc = window.location;
+  const protocol = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${loc.host}/api${path}`;
+}
+
+function ltInitWebSocket() {
+  if (!LT.active) return;
+  if (LT.ws && (LT.ws.readyState === WebSocket.CONNECTING || LT.ws.readyState === WebSocket.OPEN)) return;
+
+  console.log("Connecting to live translation WebSocket...");
+  LT.wsConnecting = true;
+
+  try {
+    const url = wsUrl('/translate/ws');
+    const ws = new WebSocket(url);
+    LT.ws = ws;
+
+    ws.onopen = () => {
+      console.log("Translation WebSocket connected successfully.");
+      LT.wsConnecting = false;
+      LT.wsFailed = false;
+      const badge = document.getElementById('ltEngineBadge');
+      if (badge) {
+        badge.textContent = '⚡ WS Streaming';
+        badge.style.borderColor = 'var(--accent-secondary)';
+        badge.style.color = 'var(--accent-secondary)';
+      }
+    };
+
+    ws.onmessage = (event) => {
+      if (!LT.active) return;
+      try {
+        const data = JSON.parse(event.data);
+        const result = document.getElementById('ltResult');
+        const spinner = document.getElementById('ltSpinner');
+
+        if (data.error) {
+          result.classList.remove('lt-streaming');
+          result.innerHTML = `<span style="color:var(--error)">⚠️ ${data.error}</span>`;
+          spinner.classList.remove('translating');
+          return;
+        }
+
+        if (data.meta) {
+          // Meta info (e.g. detected source/target language)
+          return;
+        }
+
+        if (data.content !== undefined) {
+          if (result.classList.contains('lt-placeholder') || !result.classList.contains('lt-streaming')) {
+            result.textContent = '';
+            result.classList.add('lt-streaming');
+          }
+          result.textContent += data.content;
+          result.scrollTop = result.scrollHeight;
+        }
+
+        if (data.status === 'done') {
+          LT.lastResult = result.textContent.trim();
+          result.classList.remove('lt-streaming');
+          document.getElementById('ltSpeakBtn').disabled = false;
+          document.getElementById('ltCopyBtn').disabled = false;
+          spinner.classList.remove('translating');
+        }
+      } catch (err) {
+        console.error("WS message parse error:", err);
+      }
+    };
+
+    ws.onerror = (err) => {
+      console.warn("Translation WebSocket error:", err);
+      LT.wsFailed = true;
+      LT.wsConnecting = false;
+      // Revert badge to SSE
+      const badge = document.getElementById('ltEngineBadge');
+      if (badge) {
+        badge.textContent = '🤖 LLM Streaming';
+        badge.style.borderColor = '';
+        badge.style.color = '';
+      }
+    };
+
+    ws.onclose = () => {
+      console.log("Translation WebSocket closed.");
+      LT.ws = null;
+      LT.wsConnecting = false;
+      // Re-initialize if still active and did not fail permanently
+      if (LT.active && !LT.wsFailed) {
+        setTimeout(ltInitWebSocket, 2000);
+      }
+    };
+  } catch (err) {
+    console.error("Failed to create WebSocket:", err);
+    LT.wsFailed = true;
+    LT.wsConnecting = false;
+  }
+}
+
+function ltCloseWebSocket() {
+  if (LT.ws) {
+    console.log("Closing Translation WebSocket...");
+    LT.ws.onclose = null; // prevent auto-reconnect
+    LT.ws.close();
+    LT.ws = null;
+  }
+  LT.wsConnecting = false;
+}
 
 function openLiveTranslate() {
   const overlay = document.getElementById('liveTranslateOverlay');
@@ -2130,6 +2246,7 @@ function openLiveTranslate() {
   LT.gen++;
   LT.lastTranslatedText = '';
   LT.lastResult = '';
+  LT.wsFailed = false; // Reset failure flag to attempt connection again
 
   // Reset UI
   const input = document.getElementById('ltInput');
@@ -2144,6 +2261,9 @@ function openLiveTranslate() {
   document.getElementById('ltCopyBtn').disabled = true;
   document.getElementById('ltSpinner').classList.remove('translating');
 
+  // Connect WebSocket
+  ltInitWebSocket();
+
   // Warm speech synthesis voice list
   if (window.speechSynthesis) window.speechSynthesis.getVoices();
 
@@ -2156,6 +2276,7 @@ function closeLiveTranslate() {
   LT.gen++;
   ltStopMic();
   ltStopAudio();
+  ltCloseWebSocket();
   clearTimeout(LT.debounceTimer);
   document.getElementById('liveTranslateOverlay').classList.remove('open');
 }
@@ -2221,10 +2342,6 @@ async function ltDoTranslate(text) {
   if (!LT.active) return;
   const myGen = ++LT.gen;
 
-  // Abort any in-flight request/stream immediately
-  if (LT.abortCtrl) { try { LT.abortCtrl.abort(); } catch {} }
-  LT.abortCtrl = new AbortController();
-
   const spinner = document.getElementById('ltSpinner');
   const result = document.getElementById('ltResult');
   spinner.classList.add('translating');
@@ -2236,6 +2353,23 @@ async function ltDoTranslate(text) {
   result.classList.add('lt-streaming');
   if (RTL_LANGS.has(targetLang)) result.setAttribute('dir', 'rtl');
   else result.removeAttribute('dir');
+
+  // ── Route A: WebSocket if open and ready ──
+  if (LT.ws && LT.ws.readyState === WebSocket.OPEN) {
+    LT.lastTranslatedText = text;
+    try {
+      LT.ws.send(JSON.stringify({ text, target_lang: targetLang }));
+      return;
+    } catch (err) {
+      console.warn("WebSocket send failed, falling back to SSE:", err);
+      // Fall through to SSE fallback
+    }
+  }
+
+  // ── Route B: SSE Stream Fallback ──
+  // Abort any in-flight request/stream immediately
+  if (LT.abortCtrl) { try { LT.abortCtrl.abort(); } catch {} }
+  LT.abortCtrl = new AbortController();
 
   let fullTranslation = '';
 

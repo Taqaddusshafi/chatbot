@@ -4,12 +4,13 @@ Provides chat and translation endpoints that proxy to vLLM,
 plus voice proxy endpoints that forward to the existing Voice Gateway.
 """
 
+import asyncio
 import json
 import logging
 import time
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -233,6 +234,70 @@ async def translate_stream(request: StreamTranslateRequest):
             yield {"data": json.dumps({"error": f"LLM unreachable: {str(exc)}"})}
 
     return EventSourceResponse(event_generator())
+
+
+@app.websocket("/api/translate/ws")
+async def translate_ws(websocket: WebSocket):
+    """WebSocket endpoint for real-time live translation.
+
+    Receives text frames and streams translation tokens back. Cancels any active
+    stream immediately if new text is received while translation is running.
+    """
+    await websocket.accept()
+    active_task = None
+
+    async def run_translation(text: str, target_lang: str | None):
+        try:
+            source_lang = detect_language(text)
+            actual_target_lang = target_lang or ("en" if source_lang == "ar" else "ar")
+
+            # Send metadata to start the stream
+            await websocket.send_json({
+                "meta": {
+                    "source_lang": source_lang,
+                    "target_lang": actual_target_lang
+                }
+            })
+
+            async for chunk in stream_translate(text=text, target_lang=actual_target_lang):
+                await websocket.send_json({"content": chunk})
+            
+            await websocket.send_json({"status": "done"})
+        except asyncio.CancelledError:
+            # Cancelled due to new incoming text
+            pass
+        except Exception as exc:
+            logger.error("Error in stream_translate ws: %s", exc)
+            try:
+                await websocket.send_json({"error": str(exc)})
+            except Exception:
+                pass
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            text = data.get("text", "").strip()
+            target_lang = data.get("target_lang")
+
+            if not text:
+                continue
+
+            # Cancel previous task if still running
+            if active_task and not active_task.done():
+                active_task.cancel()
+
+            active_task = asyncio.create_task(run_translation(text, target_lang))
+    except WebSocketDisconnect:
+        logger.info("Translation WebSocket disconnected")
+    except Exception as exc:
+        logger.error("Translation WebSocket connection error: %s", exc)
+    finally:
+        if active_task and not active_task.done():
+            active_task.cancel()
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 # ── Voice TTS — Edge TTS (Microsoft Neural voices) ────────────────────────────
