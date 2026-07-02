@@ -2108,7 +2108,7 @@ const LT = {
   sourceLang: 'auto',
   targetLang: 'hi',
   debounceTimer: null,
-  debounceMs: 120,         // very fast — near-instant as you type
+  debounceMs: 300,         // debounce for streaming — each keystroke aborts previous stream
   gen: 0,                  // generation counter — ignore stale responses
   abortCtrl: null,         // AbortController for in-flight fetch
   lastTranslatedText: '',  // the text we last translated (skip re-sends)
@@ -2212,15 +2212,16 @@ function ltScheduleTranslation() {
 
   if (text === LT.lastTranslatedText) return; // no change
 
-  // Ultra-fast: 60ms debounce, fires almost every keystroke
-  LT.debounceTimer = setTimeout(() => ltDoTranslate(text), 60);
+  // Debounce: 300ms avoids thrashing the LLM with every keystroke while still
+  // feeling instant. Each call aborts any in-flight stream immediately.
+  LT.debounceTimer = setTimeout(() => ltDoTranslate(text), 300);
 }
 
 async function ltDoTranslate(text) {
   if (!LT.active) return;
   const myGen = ++LT.gen;
 
-  // Abort any in-flight request immediately
+  // Abort any in-flight request/stream immediately
   if (LT.abortCtrl) { try { LT.abortCtrl.abort(); } catch {} }
   LT.abortCtrl = new AbortController();
 
@@ -2229,109 +2230,93 @@ async function ltDoTranslate(text) {
   spinner.classList.add('translating');
 
   const targetLang = LT.targetLang;
-  const srcLang = LT.sourceLang === 'auto' ? 'auto' : LT.sourceLang;
 
-  // ── Strategy 1: MyMemory Translation API (free, CORS-friendly, reliable) ──
+  // Clear result and show cursor to indicate streaming is starting
+  result.textContent = '';
+  result.classList.add('lt-streaming');
+  if (RTL_LANGS.has(targetLang)) result.setAttribute('dir', 'rtl');
+  else result.removeAttribute('dir');
+
+  let fullTranslation = '';
+
   try {
-    // MyMemory wants "en|hi" style langpair; "autodetect" if source unknown
-    const srcCode = srcLang === 'auto' ? 'autodetect' : srcLang;
-    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${encodeURIComponent(srcCode + '|' + targetLang)}`;
-    const resp = await fetch(url, { signal: LT.abortCtrl.signal });
+    // ── SSE stream from the LLM for instant subtitle-like translation ──
+    const resp = await fetch(apiUrl('/translate/stream'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, target_lang: targetLang }),
+      signal: LT.abortCtrl.signal,
+    });
 
-    if (myGen !== LT.gen) return;
-    if (resp.ok) {
-      const data = await resp.json();
-      if (myGen !== LT.gen) return;
+    if (myGen !== LT.gen) return; // superseded
 
-      const translation = (data.responseData?.translatedText || '').trim();
-      // MyMemory returns the original text uppercased if it can't translate — detect that
-      if (translation && translation.toUpperCase() !== text.toUpperCase()) {
-        LT.lastTranslatedText = text;
-        LT.lastResult = translation;
-        if (RTL_LANGS.has(targetLang)) result.setAttribute('dir', 'rtl');
-        else result.removeAttribute('dir');
-        ltInstantRender(translation);
-        document.getElementById('ltSpeakBtn').disabled = false;
-        document.getElementById('ltCopyBtn').disabled = false;
-        spinner.classList.remove('translating');
-        return;
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+      throw new Error(err.detail || `HTTP ${resp.status}`);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      if (myGen !== LT.gen) { try { await reader.cancel(); } catch {} break; }
+
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const dataStr = line.slice(6).trim();
+        if (!dataStr || dataStr === '[DONE]') continue;
+
+        try {
+          const data = JSON.parse(dataStr);
+
+          if (data.error) {
+            result.classList.remove('lt-streaming');
+            result.innerHTML = `<span style="color:var(--error)">⚠️ ${data.error}</span>`;
+            spinner.classList.remove('translating');
+            return;
+          }
+
+          // Meta event (source/target lang info) — skip rendering
+          if (data.meta) continue;
+
+          // Content token — append and render instantly
+          if (data.content) {
+            fullTranslation += data.content;
+            result.textContent = fullTranslation;
+            result.scrollTop = result.scrollHeight;
+          }
+        } catch {
+          // Skip malformed chunks
+        }
       }
     }
-  } catch (e1) {
-    if (e1.name === 'AbortError') return;
-    if (myGen !== LT.gen) return;
-  }
 
-  // ── Strategy 2: Backend /api/translate (slower but always works) ──
-  try {
-    const resp2 = await fetch(apiUrl('/translate'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, target_lang: targetLang, engine: 'api' }),
-      signal: LT.abortCtrl.signal,
-    });
     if (myGen !== LT.gen) return;
-    if (resp2.ok) {
-      const d = await resp2.json();
-      if (myGen !== LT.gen) return;
-      const t = (d.translation || '').trim();
-      LT.lastTranslatedText = text;
-      LT.lastResult = t;
-      if (RTL_LANGS.has(targetLang)) result.setAttribute('dir', 'rtl');
-      else result.removeAttribute('dir');
-      ltInstantRender(t);
-      document.getElementById('ltSpeakBtn').disabled = false;
-      document.getElementById('ltCopyBtn').disabled = false;
-      spinner.classList.remove('translating');
-      return;
-    }
-  } catch (e2) {
-    if (e2.name === 'AbortError') return;
-    if (myGen !== LT.gen) return;
-  }
 
-  // ── Strategy 3: Backend LLM fallback ──
-  try {
-    const resp3 = await fetch(apiUrl('/translate'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, target_lang: targetLang, engine: 'llm' }),
-      signal: LT.abortCtrl.signal,
-    });
+    // Stream complete — finalize
+    LT.lastTranslatedText = text;
+    LT.lastResult = fullTranslation.trim();
+    result.textContent = LT.lastResult;
+    result.classList.remove('lt-streaming');
+    document.getElementById('ltSpeakBtn').disabled = false;
+    document.getElementById('ltCopyBtn').disabled = false;
+    spinner.classList.remove('translating');
+
+  } catch (e) {
+    if (e.name === 'AbortError') return;
     if (myGen !== LT.gen) return;
-    if (resp3.ok) {
-      const d = await resp3.json();
-      if (myGen !== LT.gen) return;
-      const t = (d.translation || '').trim();
-      LT.lastTranslatedText = text;
-      LT.lastResult = t;
-      if (RTL_LANGS.has(targetLang)) result.setAttribute('dir', 'rtl');
-      else result.removeAttribute('dir');
-      ltInstantRender(t);
-      document.getElementById('ltSpeakBtn').disabled = false;
-      document.getElementById('ltCopyBtn').disabled = false;
-    } else {
-      result.innerHTML = '<span style="color:var(--error)">⚠️ Translation service unavailable</span>';
-    }
-  } catch (e3) {
-    if (e3.name === 'AbortError') return;
-    if (myGen !== LT.gen) return;
+    result.classList.remove('lt-streaming');
     result.innerHTML = '<span style="color:var(--error)">⚠️ Translation failed — check your connection</span>';
-  } finally {
-    if (myGen === LT.gen) spinner.classList.remove('translating');
+    spinner.classList.remove('translating');
   }
-}
-
-// ── Instant render with fade-in animation ─────────────────────────────────────
-function ltInstantRender(text) {
-  const result = document.getElementById('ltResult');
-  result.textContent = text;
-  // Trigger a quick fade-in via CSS class toggle
-  result.classList.remove('lt-fade');
-  // Force reflow so the re-add triggers the animation
-  void result.offsetWidth;
-  result.classList.add('lt-fade');
-  result.scrollTop = result.scrollHeight;
 }
 
 // ── Voice input via Web Speech API ────────────────────────────────────────────
@@ -2382,11 +2367,17 @@ function ltStartMic() {
       baseText += (baseText ? ' ' : '') + finalText.trim();
       input.value = baseText;
       interim.textContent = '';
-      ltOnInput(); // trigger translation
+      ltOnInput(); // trigger translation with final text
     }
 
     if (interimText) {
       interim.textContent = '🎤 ' + interimText;
+      // Also translate interim speech results for real-time subtitle feel
+      const previewText = (baseText + ' ' + interimText).trim();
+      if (previewText && previewText !== LT.lastTranslatedText) {
+        clearTimeout(LT.debounceTimer);
+        LT.debounceTimer = setTimeout(() => ltDoTranslate(previewText), 400);
+      }
     }
   };
 

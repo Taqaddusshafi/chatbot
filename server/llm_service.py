@@ -190,6 +190,73 @@ async def translate_text(text: str, target_lang: str | None = None) -> dict:
     }
 
 
+async def stream_translate(
+    text: str, target_lang: str | None = None
+) -> AsyncGenerator[str, None]:
+    """Stream translation tokens from vLLM for instant subtitle-like output.
+
+    Yields individual content chunks as they arrive via SSE.
+    The caller should also call detect_language(text) separately if it needs
+    source_lang metadata.
+    """
+    source_lang = detect_language(text)
+
+    if target_lang is None:
+        target_lang = "en" if source_lang == "ar" else "ar"
+
+    if target_lang == "ar":
+        system_prompt = settings.translate_en_to_ar_prompt
+    elif target_lang == "en" and source_lang == "ar":
+        system_prompt = settings.translate_ar_to_en_prompt
+    else:
+        target_name = LANG_NAMES.get(target_lang, target_lang)
+        system_prompt = (
+            f"You are a professional translator. Translate the following text "
+            f"into {target_name}. Provide only the translation — no explanations, "
+            "notes, transliteration, or the original text."
+        )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": text},
+    ]
+
+    payload = {
+        "model": settings.vllm_model,
+        "messages": messages,
+        "temperature": 0.0,        # Greedy for faithful translation
+        "max_tokens": 2048,
+        "top_p": 1.0,
+        "stream": True,
+    }
+
+    url = f"{settings.vllm_base_url}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {settings.vllm_api_key}",
+    }
+
+    logger.info("LLM stream-translate → %s  target=%s", url, target_lang)
+
+    async with httpx.AsyncClient(timeout=settings.vllm_timeout) as client:
+        async with client.stream("POST", url, json=payload, headers=headers) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                data_str = line[6:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    content = delta.get("content", "")
+                    if content:
+                        yield content
+                except json.JSONDecodeError:
+                    continue
+
+
 async def translate_via_api(text: str, target_lang: str | None = None) -> dict:
     """Translate using Google's free (keyless) translation endpoint.
 

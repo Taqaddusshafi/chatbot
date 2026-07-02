@@ -1596,6 +1596,25 @@ body::before {
   background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+/* Engine badge (shows "LLM Streaming") */
+.lt-engine-badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(6, 182, 212, 0.15));
+  border: 1px solid rgba(139, 92, 246, 0.25);
+  color: var(--accent-primary);
+  -webkit-text-fill-color: var(--accent-primary);
+  letter-spacing: 0.03em;
+  white-space: nowrap;
 }
 
 /* Language selectors */
@@ -1759,6 +1778,18 @@ body::before {
 .lt-result[dir="rtl"] {
   text-align: right;
   font-family: 'Noto Sans Arabic', 'Inter', sans-serif;
+}
+
+/* Streaming cursor effect (live typewriter subtitle feel) */
+.lt-result.lt-streaming::after {
+  content: '▊';
+  margin-left: 3px;
+  color: var(--accent-primary);
+  animation: ltCursorBlink 0.8s infinite;
+}
+@keyframes ltCursorBlink {
+  0%, 100% { opacity: 0; }
+  50% { opacity: 1; }
 }
 
 .lt-placeholder {

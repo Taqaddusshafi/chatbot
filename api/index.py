@@ -519,6 +519,92 @@ async def translate(request: TranslateRequest):
         )
 
 
+# ── Streaming Translation (for Live Translation panel) ───────────────────────
+
+
+class StreamTranslateRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+    target_lang: str | None = Field(
+        default=None,
+        description="Target language code (e.g. 'en', 'ar', 'hi'). "
+        "Auto-detects an Arabic↔English flip when omitted.",
+    )
+
+
+@app.post("/api/translate/stream")
+async def translate_stream(request: StreamTranslateRequest):
+    """Stream translation tokens via SSE for instant subtitle-like output.
+
+    Each SSE event contains a JSON object with either:
+      - {"content": "..."} — a chunk of the translation
+      - {"meta": {"source_lang": "...", "target_lang": "..."}} — metadata (first event)
+      - {"error": "..."} — an error message
+    """
+    source_lang = "ar" if is_arabic(request.text) else "en"
+
+    if request.target_lang:
+        target_lang = request.target_lang.lower()
+    else:
+        target_lang = "en" if source_lang == "ar" else "ar"
+    if target_lang not in LANGUAGE_NAMES:
+        target_lang = "en"
+
+    target_name = LANGUAGE_NAMES[target_lang]
+    system_prompt = build_translate_prompt(target_name)
+    user_msg = build_translate_user_msg(request.text, target_name)
+
+    payload = {
+        "model": VLLM_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg},
+        ],
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "max_tokens": 2048,
+        "stream": True,
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {VLLM_API_KEY}",
+    }
+
+    async def event_generator():
+        # Send metadata first so the frontend knows the languages
+        yield {"data": json.dumps({"meta": {"source_lang": source_lang, "target_lang": target_lang}})}
+        try:
+            async with httpx.AsyncClient(timeout=VLLM_TIMEOUT) as client:
+                async with client.stream(
+                    "POST",
+                    f"{VLLM_BASE_URL}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                ) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        data_str = line[6:].strip()
+                        if data_str == "[DONE]":
+                            yield {"data": "[DONE]"}
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            delta = chunk.get("choices", [{}])[0].get(
+                                "delta", {}
+                            )
+                            content = delta.get("content", "")
+                            if content:
+                                yield {"data": json.dumps({"content": content})}
+                        except json.JSONDecodeError:
+                            continue
+        except Exception as exc:
+            yield {"data": json.dumps({"error": str(exc)})}
+
+    return EventSourceResponse(event_generator())
+
+
 # ── Voice TTS — Edge TTS (Microsoft Neural voices) ────────────────────────────
 
 # Language → best neural voice mapping (all major Indian + international languages)

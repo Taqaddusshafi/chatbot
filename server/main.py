@@ -22,6 +22,7 @@ from llm_service import (
     detect_language,
     list_models,
     stream_chat,
+    stream_translate,
     translate_text,
     translate_via_api,
 )
@@ -189,6 +190,49 @@ async def translate(request: TranslateRequest):
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"LLM unreachable: {str(exc)}",
         )
+
+
+# ── Streaming Translation endpoint (for Live Translation) ────────────────────
+
+
+class StreamTranslateRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+    target_lang: str | None = Field(
+        default=None,
+        max_length=10,
+        description="Target language code (e.g. 'en', 'ar', 'hi'). Auto-detects if omitted.",
+    )
+
+
+@app.post("/api/translate/stream")
+async def translate_stream(request: StreamTranslateRequest):
+    """Stream translation tokens via SSE for instant subtitle-like output.
+
+    Each SSE event contains a JSON object with either:
+      - {"content": "..."} — a chunk of the translation
+      - {"meta": {"source_lang": "...", "target_lang": "..."}} — metadata (first event)
+      - {"error": "..."} — an error message
+    """
+    source_lang = detect_language(request.text)
+    target_lang = request.target_lang or ("en" if source_lang == "ar" else "ar")
+
+    async def event_generator():
+        # Send metadata first so the frontend knows the languages
+        yield {"data": json.dumps({"meta": {"source_lang": source_lang, "target_lang": target_lang}})}
+        try:
+            async for chunk in stream_translate(
+                text=request.text,
+                target_lang=target_lang,
+            ):
+                yield {"data": json.dumps({"content": chunk})}
+            yield {"data": "[DONE]"}
+        except httpx.HTTPStatusError as exc:
+            error_detail = exc.response.text[:500] if exc.response else str(exc)
+            yield {"data": json.dumps({"error": f"LLM engine error: {error_detail}"})}
+        except Exception as exc:
+            yield {"data": json.dumps({"error": f"LLM unreachable: {str(exc)}"})}
+
+    return EventSourceResponse(event_generator())
 
 
 # ── Voice TTS — Edge TTS (Microsoft Neural voices) ────────────────────────────
